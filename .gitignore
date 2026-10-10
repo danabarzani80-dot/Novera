@@ -1,0 +1,6 @@
+node_modules
+dist
+dist-electron
+data/*.db*
+data/.secret
+.env.preview
