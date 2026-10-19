@@ -290,12 +290,12 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
                       <button className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 flex items-center justify-center" onClick={() => setQty(lkey(l), l.quantity - 1)}><Minus size={14} /></button>
                       <input className="w-12 text-center text-sm font-bold border rounded-lg py-1" value={l.quantity} onChange={(e) => setQty(lkey(l), parseNum(e.target.value) || 1)} />
                       <button className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 flex items-center justify-center" onClick={() => setQty(lkey(l), l.quantity + 1)}><Plus size={14} /></button>
-                      <span className="text-xs text-slate-500 ms-2">×</span>
-                      {isAdmin ? (
+                      {isAdmin && <span className="text-xs text-slate-500 ms-2">×</span>}
+                      {isAdmin && (
                         <input className={`w-20 text-center text-sm font-bold border rounded-lg py-1 ${l.list_price !== undefined && l.unit_price !== l.list_price ? 'border-amber-400 bg-amber-50' : ''}`}
                           inputMode="numeric" title={t('selling_price')} value={l.unit_price}
                           onFocus={(e) => e.target.select()} onChange={(e) => setPrice(lkey(l), parseNum(e.target.value))} />
-                      ) : <span className="text-xs text-slate-500">{iqd(l.unit_price)}</span>}
+                      )}
                     </div>
                     <b className="text-sm">{iqd(l.unit_price * l.quantity)}</b>
                   </div>
