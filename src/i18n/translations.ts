@@ -158,6 +158,8 @@ export const dictionary: Record<string, T> = {
   down_payment: ['Paid now (down payment)', 'ئێستا دراو (پێشەکی)', 'المدفوع الآن (دفعة أولى)'],
   exact: ['Exact', 'هەمان بڕ', 'المبلغ بالضبط'],
   change: ['Change', 'ماوە بۆ کڕیار', 'الباقي'],
+  keep_extra: ['Count full amount as sale (no change)', 'هەموو بڕەکە وەک فرۆشتن هەژمار بکە (بێ گەڕاندنەوە)', 'احتساب كامل المبلغ كمبيع (بدون باقي)'],
+  extra_amount: ['Extra', 'زیادە', 'زيادة'],
   hold: ['Hold', 'هەڵگرتن', 'تعليق'],
   pay: ['Pay', 'پارەدان', 'دفع'],
   sale_held: ['Sale held. You can start a new one.', 'فرۆشتن هەڵگیرا. دەتوانیت یەکێکی نوێ دەستپێبکەیت.', 'تم تعليق البيع. يمكنك بدء عملية جديدة.'],

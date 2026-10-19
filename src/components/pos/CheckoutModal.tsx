@@ -3,7 +3,7 @@ import { iqd } from '../../lib/format';
 import { Modal } from '../common/ui';
 
 export interface CheckoutSummary {
-  items: number; subtotal: number; discount: number; total: number; method: string; cash: number; card: number; qarz: number; change: number; customer?: string;
+  items: number; subtotal: number; discount: number; total: number; method: string; cash: number; card: number; qarz: number; change: number; extra?: number; customer?: string;
 }
 
 export function CheckoutModal({ s, busy, onConfirm, onClose }: { s: CheckoutSummary; busy: boolean; onConfirm: () => void; onClose: () => void }) {
@@ -20,6 +20,7 @@ export function CheckoutModal({ s, busy, onConfirm, onClose }: { s: CheckoutSumm
       <Row k={t('items')} v={String(s.items)} />
       <Row k={t('subtotal')} v={iqd(s.subtotal)} />
       {s.discount > 0 && <Row k={t('discount')} v={`-${iqd(s.discount)}`} />}
+      {!!s.extra && s.extra > 0 && <Row k={t('extra_amount')} v={`+${iqd(s.extra)}`} />}
       <Row k={t('payment_method')} v={t(m[s.method])} />
       {s.customer && <Row k={t('customer')} v={s.customer} />}
       {s.cash > 0 && <Row k={t('pay_cash')} v={iqd(s.cash)} />}

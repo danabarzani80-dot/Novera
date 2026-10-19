@@ -57,6 +57,7 @@ export interface CheckoutInput {
   card_amount?: number;
   discount_pct?: number;
   discount_amount?: number;
+  extra_amount?: number; // amount added on top (flexible pricing)
   prescription_id?: number | null;
 }
 
@@ -127,7 +128,8 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
     const subtotal = lines.reduce((s, l) => s + l.total, 0);
     const pct = Math.min(100, Math.max(0, Number(input.discount_pct) || 0));
     const discount = Math.min(subtotal, Math.round((subtotal * pct) / 100) + Math.max(0, int(input.discount_amount)));
-    const grand = subtotal - discount;
+    const extra = Math.max(0, int(input.extra_amount));
+    const grand = subtotal - discount + extra;
 
     let cash = 0, card = 0, qarz = 0, received = 0, change = 0;
     const method = input.payment_method;
@@ -160,7 +162,7 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
     const info = db.prepare(`INSERT INTO invoices (invoice_number,user_id,customer_id,branch_id,shift_id,subtotal,tax_amount,discount_amount,grand_total,
       payment_method,cash_amount,card_amount,qarz_amount,received_amount,change_amount,status,created_at)
       VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,'completed',?)`)
-      .run(invoiceNumber, actor.id, input.customer_id ?? null, actor.branch_id, shift.id, subtotal, discount, grand, method, cash, card, qarz, received, change, nowIso());
+      .run(invoiceNumber, actor.id, input.customer_id ?? null, actor.branch_id, shift.id, subtotal, discount - extra, grand, method, cash, card, qarz, received, change, nowIso());
     const invoiceId = Number(info.lastInsertRowid);
 
     const ins = db.prepare('INSERT INTO invoice_items (invoice_id,product_id,batch_id,quantity,unit_price,purchase_price,total_amount) VALUES (?,?,?,?,?,?,?)');

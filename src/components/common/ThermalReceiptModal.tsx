@@ -36,6 +36,7 @@ export function ThermalReceiptModal({ invoiceId, onClose }: { invoiceId: number;
             <hr />
             <div className="row"><span>{t('subtotal')}</span><span>{num(inv.subtotal)}</span></div>
             {inv.discount_amount > 0 && <div className="row"><span>{t('discount')}</span><span>-{num(inv.discount_amount)}</span></div>}
+            {inv.discount_amount < 0 && <div className="row"><span>{t('extra_amount')}</span><span>+{num(-inv.discount_amount)}</span></div>}
             <div className="row" style={{ fontWeight: 700, fontSize: 14 }}><span>{t('total')}</span><span>{num(inv.grand_total)} د.ع</span></div>
             <div className="row"><span>{t('payment_method')}</span><span>{t(methodKey[inv.payment_method])}</span></div>
             {inv.payment_method !== 'card' && inv.received_amount > 0 && <div className="row"><span>{t('amount_received')}</span><span>{num(inv.received_amount)}</span></div>}
