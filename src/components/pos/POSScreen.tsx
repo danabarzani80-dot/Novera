@@ -116,8 +116,11 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
 
   const received = parseNum(cart.received);
   // Flexible pricing: optionally count everything received as the sale (no change given).
-  const extra = cart.keepExtra && cart.method === 'cash' ? Math.max(0, received - baseTotal) : 0;
-  const total = baseTotal + extra;
+  // "Sell at the amount received": the cash received becomes the sale total (higher = extra, lower = discount).
+  const atReceived = !!cart.keepExtra && cart.method === 'cash' && received > 0;
+  const extra = atReceived ? Math.max(0, received - baseTotal) : 0;
+  const shortfall = atReceived ? Math.max(0, baseTotal - received) : 0;
+  const total = baseTotal + extra - shortfall;
   const cardAmt = Math.min(total, parseNum(cart.card));
   const cashDue = cart.method === 'mixed' ? total - cardAmt : total;
   const change = cart.method === 'cash' ? Math.max(0, received - total) : cart.method === 'mixed' ? Math.max(0, received - cashDue) : 0;
@@ -159,7 +162,7 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
       customer_id: cart.customer?.id ?? null, payment_method: cart.method,
       cash_received: cart.method === 'card' ? 0 : received || (cart.method === 'qarz' ? 0 : cashDue),
       card_amount: cart.method === 'mixed' ? cardAmt : 0,
-      discount_pct: pct, discount_amount: parseNum(cart.discAmt), extra_amount: extra, prescription_id: cart.prescriptionId ?? null,
+      discount_pct: pct, discount_amount: parseNum(cart.discAmt) + shortfall, extra_amount: extra, prescription_id: cart.prescriptionId ?? null,
     }));
     setConfirming(false);
     if (r) {
@@ -332,9 +335,13 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
                 {cart.method !== 'qarz' && <button className="btn-ghost !py-1 !px-2 !text-xs" onClick={() => patch({ received: String(cashDue) })}>{t('exact')}</button>}
                 {quick.map((v) => <button key={v} className="btn-ghost !py-1 !px-2 !text-xs" onClick={() => patch({ received: String(v) })}>{v.toLocaleString('en-US')}</button>)}
               </div>
-              {cart.method === 'cash' && (received > baseTotal || cart.keepExtra) && (
+              {cart.method === 'cash' && ((received > 0 && received !== baseTotal) || cart.keepExtra) && (
                 <label className="mt-2 flex items-center gap-2 text-sm font-bold text-amber-700">
                   <input type="checkbox" checked={!!cart.keepExtra} onChange={(e) => patch({ keepExtra: e.target.checked })} />{t('keep_extra')}</label>
+              )}
+              {shortfall > 0 && (
+                <div className="mt-2 rounded-xl bg-rose-50 border border-rose-200 p-2 flex justify-between text-rose-700 font-extrabold">
+                  <span>{t('discount')}</span><span>-{iqd(shortfall)}</span></div>
               )}
               {extra > 0 && (
                 <div className="mt-2 rounded-xl bg-amber-50 border border-amber-200 p-2 flex justify-between text-amber-700 font-extrabold">
@@ -358,7 +365,7 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
 
       {alt && <AlternativeMedicineModal product={alt} onClose={() => setAlt(null)} onPick={addProduct} />}
       {confirming && <CheckoutModal busy={busy} onClose={() => setConfirming(false)} onConfirm={doCheckout}
-        s={{ items: itemCount, subtotal, discount, total, method: cart.method, customer: cart.customer?.name,
+        s={{ items: itemCount, subtotal, discount: discount + shortfall, total, method: cart.method, customer: cart.customer?.name,
           cash: cart.method === 'cash' ? total : cart.method === 'mixed' ? cashDue : cart.method === 'qarz' ? Math.min(total, received) : 0,
           card: cart.method === 'card' ? total : cart.method === 'mixed' ? cardAmt : 0, qarz: qarzPart, change, extra }} />}
       {unitPick && (

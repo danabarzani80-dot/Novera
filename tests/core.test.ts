@@ -109,6 +109,13 @@ test('medicines with 1 sheet per pack behave exactly as before', () => {
   assert.equal(core.getInvoice(db, r.id).grand_total, 4000); assert.equal(qty(b), 2);
 });
 
+test('sell at amount received (lower): difference recorded as discount', () => {
+  const p = prod('Lower'); batch(p, 'L1', day(200), 5, 1500, 3000);
+  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 2500, discount_amount: 500 });
+  const inv = core.getInvoice(db, r.id);
+  assert.equal(inv.grand_total, 2500); assert.equal(inv.change_amount, 0); assert.equal(inv.discount_amount, 500);
+});
+
 test('expired batches are blocked by the backend (FEFO path and explicit batch)', () => {
   const p = prod('Exp');
   const bad = batch(p, 'OLD', day(-1), 10, 100, 300);
