@@ -82,6 +82,7 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
       if (it.unit_price !== undefined && it.unit_price !== null && String(it.unit_price) !== '') {
         override = int(it.unit_price);
         if (override < 0) throw new BizError('Price cannot be negative.');
+        if (actor.role !== 'super_admin') throw new BizError('Only the admin can change prices.', 'FORBIDDEN', 403);
       }
       const key = `${it.product_id}:${it.batch_id ?? ''}:${unit}`;
       const w = wanted.get(key);

@@ -19,7 +19,8 @@ const emptyCart = (id: number): Cart => ({ id, lines: [], customer: null, discPc
 
 export default function POSScreen({ onSold }: { onSold: () => void }) {
   const { t } = useI18n();
-  const { shift, refresh } = useAuth();
+  const { shift, refresh, user } = useAuth();
+  const isAdmin = user?.role === 'super_admin'; // only the admin may see/change the price box
   const { toast } = useToast();
   const { run, busy } = useAction();
   const [carts, setCarts] = useState<Cart[]>([emptyCart(1)]);
@@ -153,7 +154,8 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
 
   const doCheckout = async () => {
     const r = await run(() => api.post('/checkout', {
-      items: cart.lines.map((l) => ({ product_id: l.product_id, quantity: l.quantity, unit_price: l.unit_price, unit: l.unit ?? 'pack' })),
+      items: cart.lines.map((l) => ({ product_id: l.product_id, quantity: l.quantity, unit: l.unit ?? 'pack',
+        ...(isAdmin && l.list_price !== undefined && l.unit_price !== l.list_price ? { unit_price: l.unit_price } : {}) })),
       customer_id: cart.customer?.id ?? null, payment_method: cart.method,
       cash_received: cart.method === 'card' ? 0 : received || (cart.method === 'qarz' ? 0 : cashDue),
       card_amount: cart.method === 'mixed' ? cardAmt : 0,
@@ -289,9 +291,11 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
                       <input className="w-12 text-center text-sm font-bold border rounded-lg py-1" value={l.quantity} onChange={(e) => setQty(lkey(l), parseNum(e.target.value) || 1)} />
                       <button className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 flex items-center justify-center" onClick={() => setQty(lkey(l), l.quantity + 1)}><Plus size={14} /></button>
                       <span className="text-xs text-slate-500 ms-2">×</span>
-                      <input className={`w-20 text-center text-sm font-bold border rounded-lg py-1 ${l.list_price !== undefined && l.unit_price !== l.list_price ? 'border-amber-400 bg-amber-50' : ''}`}
-                        inputMode="numeric" title={t('selling_price')} value={l.unit_price}
-                        onFocus={(e) => e.target.select()} onChange={(e) => setPrice(lkey(l), parseNum(e.target.value))} />
+                      {isAdmin ? (
+                        <input className={`w-20 text-center text-sm font-bold border rounded-lg py-1 ${l.list_price !== undefined && l.unit_price !== l.list_price ? 'border-amber-400 bg-amber-50' : ''}`}
+                          inputMode="numeric" title={t('selling_price')} value={l.unit_price}
+                          onFocus={(e) => e.target.select()} onChange={(e) => setPrice(lkey(l), parseNum(e.target.value))} />
+                      ) : <span className="text-xs text-slate-500">{iqd(l.unit_price)}</span>}
                     </div>
                     <b className="text-sm">{iqd(l.unit_price * l.quantity)}</b>
                   </div>

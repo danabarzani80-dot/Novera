@@ -33,9 +33,11 @@ test('FEFO takes the earliest-expiring batch first and spans batches', () => {
   assert.equal(inv.items.find((i: any) => i.batch_number === 'EARLY').purchase_price, 80); // stored for COGS
 });
 
-test('cashier can override the selling price (flexible pricing)', () => {
+test('only the admin can override the selling price (flexible pricing)', () => {
   const p = prod('Flex'); batch(p, 'F1', day(200), 5, 1500, 3000);
-  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit_price: 4000 }], payment_method: 'cash', cash_received: 5000 });
+  const admin = { ...actor, role: 'super_admin' };
+  throwsCode(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit_price: 4000 }], payment_method: 'cash', cash_received: 5000 }), 'FORBIDDEN'); // cashier blocked
+  const r = core.checkout(db, admin, { items: [{ product_id: p, quantity: 1, unit_price: 4000 }], payment_method: 'cash', cash_received: 5000 });
   const inv = core.getInvoice(db, r.id);
   assert.equal(inv.grand_total, 4000);
   assert.equal(inv.items[0].unit_price, 4000);
