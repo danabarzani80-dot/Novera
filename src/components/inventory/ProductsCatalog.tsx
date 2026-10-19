@@ -2,12 +2,12 @@ import { useEffect, useState } from 'react';
 import { Boxes, ChevronLeft, ChevronRight, Edit3, Layers, Plus, Printer, RefreshCw, Search, SlidersHorizontal, Trash2, Wand2 } from 'lucide-react';
 import { useI18n } from '../../i18n/I18nContext';
 import { api, qs } from '../../lib/api';
-import { iqd } from '../../lib/format';
+import { iqd, stockText } from '../../lib/format';
 import type { Product } from '../../types/pharmacy';
 import { Badge, Confirm, Empty, Field, Modal, PageTitle, Skeleton, Tabs, useAction, useDebounced, useLoad } from '../common/ui';
 import { useAuth } from '../../lib/auth';
 
-const BLANK = { barcode: '', brand_name: '', generic_name: '', category: '', manufacturer: '', dosage: '', form: '', unit: 'tablet', shelf_rack: '', is_rx: false, reorder_level: 10 };
+const BLANK = { barcode: '', brand_name: '', generic_name: '', category: '', manufacturer: '', dosage: '', form: '', unit: 'tablet', shelf_rack: '', is_rx: false, reorder_level: 10, sheets_per_pack: 1, sheet_price: '' as any, tablets_per_sheet: 1, tablet_price: '' as any };
 
 export default function ProductsCatalog() {
   const { t } = useI18n();
@@ -60,7 +60,8 @@ export default function ProductsCatalog() {
                   return (<tr key={p.id}>
                     <td className="td"><div className="font-bold">{p.brand_name} {p.is_rx ? <Badge tone="purple">Rx</Badge> : null}</div><div className="text-xs text-slate-400 font-mono">{p.barcode}</div></td>
                     <td className="td">{p.generic_name}</td><td className="td">{p.manufacturer}</td>
-                    <td className="td"><span className={`font-bold ${st === 0 ? 'text-red-600' : st <= p.reorder_level ? 'text-amber-600' : 'text-emerald-600'}`}>{st}</span></td>
+                    <td className="td"><span className={`font-bold ${st === 0 && !(p.loose ?? 0) ? 'text-red-600' : st <= p.reorder_level ? 'text-amber-600' : 'text-emerald-600'}`}>{st}</span>
+                      {((p.sheets_per_pack ?? 1) > 1 || (p.tablets_per_sheet ?? 1) > 1) && <div className="text-[11px] text-slate-500">{stockText(st, p.loose ?? 0, p.sheets_per_pack ?? 1, p.tablets_per_sheet ?? 1, t)}</div>}</td>
                     <td className="td font-bold">{p.price ? iqd(p.price) : '—'}</td><td className="td">{p.category}</td>
                     <td className="td">{[p.dosage, p.form].filter(Boolean).join(' / ')}</td><td className="td">{p.shelf_rack}</td><td className="td">{p.nearest_expiry?.slice(0, 7) ?? '—'}</td>
                     <td className="td whitespace-nowrap">
@@ -116,6 +117,14 @@ function ProductForm({ initial, onClose, onSaved }: { initial: any; onClose: () 
         <Field label={t('form')}><input className="input" placeholder="Tablet" value={f.form ?? ''} onChange={set('form')} /></Field>
         <Field label={t('unit')}><input className="input" value={f.unit ?? ''} onChange={set('unit')} /></Field>
         <Field label={t('shelf')}><input className="input" value={f.shelf_rack ?? ''} onChange={set('shelf_rack')} /></Field>
+        <Field label={t('sheets_per_pack')}><input className="input" type="number" min={1} value={f.sheets_per_pack ?? 1} onChange={set('sheets_per_pack')} />
+          <div className="text-[11px] text-slate-500 mt-1">{t('sheets_per_pack_hint')}</div></Field>
+        {Number(f.sheets_per_pack ?? 1) > 1 && <Field label={t('sheet_price')}><input className="input" inputMode="numeric" value={f.sheet_price ?? ''} onChange={set('sheet_price')} />
+          <div className="text-[11px] text-slate-500 mt-1">{t('sheet_price_hint')}</div></Field>}
+        <Field label={t('tablets_per_sheet')}><input className="input" type="number" min={1} value={f.tablets_per_sheet ?? 1} onChange={set('tablets_per_sheet')} />
+          <div className="text-[11px] text-slate-500 mt-1">{t('tablets_per_sheet_hint')}</div></Field>
+        {Number(f.tablets_per_sheet ?? 1) > 1 && <Field label={t('tablet_price')}><input className="input" inputMode="numeric" value={f.tablet_price ?? ''} onChange={set('tablet_price')} />
+          <div className="text-[11px] text-slate-500 mt-1">{t('tablet_price_hint')}</div></Field>}
         <Field label={t('reorder_level')}><input className="input" type="number" min={0} value={f.reorder_level} onChange={set('reorder_level')} /></Field>
         <Field label={t('supplier')}><select className="input" value={f.supplier_id ?? ''} onChange={set('supplier_id')}><option value="">—</option>{sup.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
         <label className="flex items-center gap-2 text-sm font-bold pt-6"><input type="checkbox" checked={!!f.is_rx} onChange={set('is_rx')} />{t('rx_required')}</label>

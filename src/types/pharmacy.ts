@@ -37,8 +37,10 @@ export interface Product {
   manufacturer: string | null; dosage: string | null; form: string | null; unit: string | null;
   shelf_rack: string | null; is_rx: number; reorder_level: number; supplier_id: number | null;
   stock?: number; total_stock?: number; price?: number; nearest_expiry?: string | null; cost?: number;
+  sheets_per_pack?: number; sheet_price?: number | null; tablets_per_sheet?: number; tablet_price?: number | null; loose?: number;
 }
 
 export interface CartLine {
   product_id: number; name: string; dosage?: string | null; unit_price: number; list_price?: number; quantity: number; max: number;
+  key?: string; unit?: 'pack' | 'sheet' | 'tablet';
 }

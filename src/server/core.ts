@@ -50,7 +50,7 @@ export function supplierBalance(db: DB, supplierId: number): number {
 
 // ───────────────────────── Checkout (FEFO) ─────────────────────────
 export interface CheckoutInput {
-  items: { product_id: number; quantity: number; batch_id?: number; unit_price?: number }[];
+  items: { product_id: number; quantity: number; batch_id?: number; unit_price?: number; unit?: 'pack' | 'sheet' | 'tablet' }[];
   customer_id?: number | null;
   payment_method: 'cash' | 'card' | 'mixed' | 'qarz';
   cash_received?: number;
@@ -68,28 +68,60 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
     if (!input.items?.length) throw new BizError('The receipt is empty.');
     const today = todayStr();
 
-    type Line = { product_id: number; batch_id: number; quantity: number; unit_price: number; purchase_price: number; total: number };
+    type Unit = 'pack' | 'sheet' | 'tablet';
+    type Line = { product_id: number; batch_id: number; quantity: number; unit_price: number; purchase_price: number; total: number; sale_unit: Unit; unit_size: number; pack_size: number };
     const lines: Line[] = [];
-    // Aggregate requested quantity per product (and per explicit batch).
-    const wanted = new Map<string, { product_id: number; batch_id?: number; quantity: number; unit_price?: number }>();
+    // Aggregate requested quantity per product + unit (+ explicit batch). Quantity is in the chosen unit.
+    const wanted = new Map<string, { product_id: number; batch_id?: number; quantity: number; unit_price?: number; unit: Unit }>();
     for (const it of input.items) {
       const q = int(it.quantity);
       if (q <= 0) throw new BizError('Quantity must be greater than zero.');
-      const key = `${it.product_id}:${it.batch_id ?? ''}`;
-      const w = wanted.get(key);
-      // Optional price override typed by the cashier (flexible pricing).
+      const unit: Unit = it.unit === 'sheet' || it.unit === 'tablet' ? it.unit : 'pack';
+      // Optional price override typed by the cashier (flexible pricing), per chosen unit.
       let override: number | undefined;
       if (it.unit_price !== undefined && it.unit_price !== null && String(it.unit_price) !== '') {
         override = int(it.unit_price);
         if (override < 0) throw new BizError('Price cannot be negative.');
       }
+      const key = `${it.product_id}:${it.batch_id ?? ''}:${unit}`;
+      const w = wanted.get(key);
       if (w) { w.quantity += q; if (override !== undefined) w.unit_price = override; }
-      else wanted.set(key, { product_id: it.product_id, batch_id: it.batch_id, quantity: q, unit_price: override });
+      else wanted.set(key, { product_id: it.product_id, batch_id: it.batch_id, quantity: q, unit_price: override, unit });
     }
 
+    // In-memory stock per batch for this sale, so packs, sheets and tablets of the same medicine never oversell.
+    const state = new Map<number, { packs: number; loose: number }>();
+    const st = (b: any) => { let x = state.get(b.id); if (!x) { x = { packs: b.quantity, loose: b.loose_units ?? 0 }; state.set(b.id, x); } return x; };
+
     for (const w of wanted.values()) {
-      const product = db.prepare('SELECT id, brand_name FROM products WHERE id = ? AND active = 1').get(w.product_id) as any;
+      const product = db.prepare('SELECT id, brand_name, sheets_per_pack, sheet_price, tablets_per_sheet, tablet_price FROM products WHERE id = ? AND active = 1').get(w.product_id) as any;
       if (!product) throw new BizError('Medicine not found.', 'NOT_FOUND', 404);
+      const spp = Math.max(1, int(product.sheets_per_pack) || 1);
+      const tps = Math.max(1, int(product.tablets_per_sheet) || 1);
+      const pack = spp * tps; // smallest units (tablets, or sheets) in one pack
+      // A unit that does not exist for this medicine falls back to the next bigger one.
+      let unit: Unit = w.unit;
+      if (unit === 'tablet' && tps === 1) unit = 'sheet';
+      if (unit === 'sheet' && spp === 1) unit = 'pack';
+      const size = unit === 'pack' ? pack : unit === 'sheet' ? tps : 1;
+      const avail = (b: any) => { const x = st(b); return unit === 'pack' ? x.packs : Math.floor((x.packs * pack + x.loose) / size); };
+      const take = (b: any, n: number) => {
+        const x = st(b);
+        if (unit === 'pack') { x.packs -= n; return; }
+        let need = n * size;
+        const fromLoose = Math.min(need, x.loose); x.loose -= fromLoose; need -= fromLoose;
+        if (need > 0) { const open = Math.ceil(need / pack); x.packs -= open; x.loose += open * pack - need; }
+      };
+      const defaultPrice = (b: any) => unit === 'pack' ? b.selling_price
+        : unit === 'sheet' ? (product.sheet_price ?? Math.round(b.selling_price / spp))
+        : (product.tablet_price ?? Math.round(b.selling_price / pack));
+      const priceOf = (b: any) => w.unit_price ?? defaultPrice(b);
+      const costOf = (b: any) => (b.purchase_price * size) / pack;
+      const push = (b: any, n: number) => {
+        const price = priceOf(b);
+        lines.push({ product_id: w.product_id, batch_id: b.id, quantity: n, unit_price: price, purchase_price: costOf(b), total: Math.round(price * n), sale_unit: unit, unit_size: size, pack_size: pack });
+        take(b, n);
+      };
 
       if (w.batch_id) {
         const b = db.prepare('SELECT * FROM batches WHERE id = ? AND product_id = ? AND branch_id = ?')
@@ -98,25 +130,25 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
         if (b.expiry_date < today) {
           throw new BizError(`Sale blocked: batch ${b.batch_number} of ${product.brand_name} is expired (${b.expiry_date}).`, 'EXPIRED_BATCH');
         }
-        if (b.quantity < w.quantity) throw new BizError(`Not enough stock in batch ${b.batch_number} of ${product.brand_name}.`, 'NO_STOCK');
-        { const price = w.unit_price ?? b.selling_price; lines.push({ product_id: w.product_id, batch_id: b.id, quantity: w.quantity, unit_price: price, purchase_price: b.purchase_price, total: price * w.quantity }); }
+        if (avail(b) < w.quantity) throw new BizError(`Not enough stock in batch ${b.batch_number} of ${product.brand_name}.`, 'NO_STOCK');
+        push(b, w.quantity);
         continue;
       }
 
       // FEFO: earliest expiry first among non-expired batches.
       const batches = db.prepare(
-        `SELECT * FROM batches WHERE product_id = ? AND branch_id = ? AND quantity > 0 AND expiry_date >= ?
+        `SELECT * FROM batches WHERE product_id = ? AND branch_id = ? AND (quantity > 0 OR loose_units > 0) AND expiry_date >= ?
          ORDER BY expiry_date ASC, id ASC`).all(w.product_id, actor.branch_id, today) as any[];
       let remaining = w.quantity;
       for (const b of batches) {
         if (remaining <= 0) break;
-        const take = Math.min(remaining, b.quantity);
-        const price = w.unit_price ?? b.selling_price;
-        lines.push({ product_id: w.product_id, batch_id: b.id, quantity: take, unit_price: price, purchase_price: b.purchase_price, total: price * take });
-        remaining -= take;
+        const n = Math.min(remaining, avail(b));
+        if (n <= 0) continue;
+        push(b, n);
+        remaining -= n;
       }
       if (remaining > 0) {
-        const expired = db.prepare('SELECT COALESCE(SUM(quantity),0) q FROM batches WHERE product_id = ? AND branch_id = ? AND expiry_date < ? AND quantity > 0')
+        const expired = db.prepare('SELECT COALESCE(SUM(quantity + loose_units),0) q FROM batches WHERE product_id = ? AND branch_id = ? AND expiry_date < ? AND (quantity > 0 OR loose_units > 0)')
           .get(w.product_id, actor.branch_id, today) as any;
         if (expired.q > 0) {
           throw new BizError(`Sale blocked: only expired stock remains for ${product.brand_name}. Expired batches cannot be sold.`, 'EXPIRED_BATCH');
@@ -165,12 +197,12 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
       .run(invoiceNumber, actor.id, input.customer_id ?? null, actor.branch_id, shift.id, subtotal, discount - extra, grand, method, cash, card, qarz, received, change, nowIso());
     const invoiceId = Number(info.lastInsertRowid);
 
-    const ins = db.prepare('INSERT INTO invoice_items (invoice_id,product_id,batch_id,quantity,unit_price,purchase_price,total_amount) VALUES (?,?,?,?,?,?,?)');
-    const dec = db.prepare('UPDATE batches SET quantity = quantity - ? WHERE id = ? AND quantity >= ?');
-    for (const l of lines) {
-      ins.run(invoiceId, l.product_id, l.batch_id, l.quantity, l.unit_price, l.purchase_price, l.total);
-      const r = dec.run(l.quantity, l.batch_id, l.quantity);
-      if (r.changes !== 1) throw new BizError('Stock changed while selling. Please retry.', 'NO_STOCK');
+    const ins = db.prepare('INSERT INTO invoice_items (invoice_id,product_id,batch_id,quantity,unit_price,purchase_price,total_amount,sale_unit,unit_size,pack_size) VALUES (?,?,?,?,?,?,?,?,?,?)');
+    for (const l of lines) ins.run(invoiceId, l.product_id, l.batch_id, l.quantity, l.unit_price, l.purchase_price, l.total, l.sale_unit, l.unit_size, l.pack_size);
+    const save = db.prepare('UPDATE batches SET quantity = ?, loose_units = ? WHERE id = ?');
+    for (const [id, x] of state) {
+      if (x.packs < 0 || x.loose < 0) throw new BizError('Stock changed while selling. Please retry.', 'NO_STOCK');
+      save.run(x.packs, x.loose, id);
     }
     if (input.prescription_id) db.prepare("UPDATE prescriptions SET status='dispensed' WHERE id = ?").run(input.prescription_id);
 
@@ -223,7 +255,15 @@ export function createSalesReturn(db: DB, actor: Actor, input: { invoice_id: num
       db.prepare('INSERT INTO sales_return_items (return_id,invoice_item_id,batch_id,product_id,quantity,unit_price,purchase_price) VALUES (?,?,?,?,?,?,?)')
         .run(rid, line.id, line.batch_id, line.product_id, q, line.unit_price, line.purchase_price);
       db.prepare('UPDATE invoice_items SET returned_qty = returned_qty + ? WHERE id = ?').run(q, line.id);
-      db.prepare('UPDATE batches SET quantity = quantity + ? WHERE id = ?').run(q, line.batch_id); // back to original batch
+      if (line.sale_unit !== 'pack' && line.pack_size > 1) {
+        // Sheets/tablets go back as loose units; every full pack's worth is closed again.
+        const b = db.prepare('SELECT quantity, loose_units FROM batches WHERE id = ?').get(line.batch_id) as any;
+        const loose = (b.loose_units ?? 0) + q * line.unit_size;
+        db.prepare('UPDATE batches SET quantity = ?, loose_units = ? WHERE id = ?')
+          .run(b.quantity + Math.floor(loose / line.pack_size), loose % line.pack_size, line.batch_id);
+      } else {
+        db.prepare('UPDATE batches SET quantity = quantity + ? WHERE id = ?').run(q, line.batch_id); // back to original batch
+      }
     }
     audit(db, actor, 'returns', 'SALES_RETURN', { invoice: inv.invoice_number, total, refund: input.refund_method });
     return { id: rid, total };

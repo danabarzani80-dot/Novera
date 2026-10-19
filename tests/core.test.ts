@@ -54,6 +54,59 @@ test('keep extra: full amount received counts as the sale (no change)', () => {
   assert.equal(inv.discount_amount, -1000);
 });
 
+test('sell by pack or by sheet: opens a pack, tracks loose sheets, no overselling', () => {
+  const p = prod('Strip');
+  db.prepare('UPDATE products SET sheets_per_pack = 2, sheet_price = 3500 WHERE id = ?').run(p);
+  const b = batch(p, 'S1', day(200), 3, 4000, 6000); // 3 packs = 6 sheets, pack cost 4000, pack price 6000
+  const loose = () => (db.prepare('SELECT loose_units l FROM batches WHERE id=?').get(b) as any).l;
+  // 1 sheet: opens a pack -> 2 packs + 1 loose sheet
+  const r1 = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit: 'sheet' }], payment_method: 'cash', cash_received: 3500 });
+  const i1 = core.getInvoice(db, r1.id);
+  assert.equal(i1.grand_total, 3500); assert.equal(qty(b), 2); assert.equal(loose(), 1);
+  assert.equal(i1.items[0].purchase_price, 2000); // sheet cost = pack cost / 2
+  // 1 pack + 1 sheet in the same sale: uses the loose sheet first, then a whole pack
+  const r2 = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit: 'pack' }, { product_id: p, quantity: 1, unit: 'sheet' }], payment_method: 'cash', cash_received: 9500 });
+  assert.equal(core.getInvoice(db, r2.id).grand_total, 6000 + 3500); assert.equal(qty(b), 1); assert.equal(loose(), 0);
+  // only 1 pack (2 sheets) left: 3 sheets must fail, 2 packs must fail
+  assert.throws(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 3, unit: 'sheet' }], payment_method: 'cash', cash_received: 99999 }));
+  assert.throws(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 2, unit: 'pack' }], payment_method: 'cash', cash_received: 99999 }));
+  assert.equal(qty(b), 1); assert.equal(loose(), 0); // failed sales change nothing
+  // returning a sheet puts it back as a loose sheet; two loose sheets close back into a pack
+  const line = i1.items[0];
+  core.createSalesReturn(db, actor, { invoice_id: r1.id, items: [{ invoice_item_id: line.id, quantity: 1 }], refund_method: 'cash' });
+  assert.equal(qty(b), 1); assert.equal(loose(), 1);
+});
+
+test('pack / sheet / tablet: 1 pack = 3 sheets x 10 tablets', () => {
+  const p = prod('Tabs');
+  db.prepare('UPDATE products SET sheets_per_pack = 3, tablets_per_sheet = 10 WHERE id = ?').run(p);
+  const b = batch(p, 'T1', day(200), 2, 6000, 9000); // 2 packs = 60 tablets; sheet 3000, tablet 300
+  const loose = () => (db.prepare('SELECT loose_units l FROM batches WHERE id=?').get(b) as any).l;
+  // 4 tablets: opens one pack -> 1 pack + 26 loose tablets
+  const r1 = core.checkout(db, actor, { items: [{ product_id: p, quantity: 4, unit: 'tablet' }], payment_method: 'cash', cash_received: 1200 });
+  const i1 = core.getInvoice(db, r1.id);
+  assert.equal(i1.grand_total, 4 * 300); assert.equal(qty(b), 1); assert.equal(loose(), 26);
+  assert.equal(i1.items[0].purchase_price, 200); // tablet cost = 6000 / 30
+  // 1 sheet (10 tablets) from the loose ones
+  const r2 = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit: 'sheet' }], payment_method: 'cash', cash_received: 3000 });
+  assert.equal(core.getInvoice(db, r2.id).grand_total, 3000); assert.equal(qty(b), 1); assert.equal(loose(), 16);
+  // last whole pack still sellable as a pack
+  core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit: 'pack' }], payment_method: 'cash', cash_received: 9000 });
+  assert.equal(qty(b), 0); assert.equal(loose(), 16);
+  // no whole pack left; 2 sheets need 20 tablets but only 16 remain
+  assert.throws(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit: 'pack' }], payment_method: 'cash', cash_received: 99999 }));
+  assert.throws(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 2, unit: 'sheet' }], payment_method: 'cash', cash_received: 99999 }));
+  // returning the 4 tablets: 20 loose, still less than a pack (30)
+  core.createSalesReturn(db, actor, { invoice_id: r1.id, items: [{ invoice_item_id: i1.items[0].id, quantity: 4 }], refund_method: 'cash' });
+  assert.equal(qty(b), 0); assert.equal(loose(), 20);
+});
+
+test('medicines with 1 sheet per pack behave exactly as before', () => {
+  const p = prod('Whole'); const b = batch(p, 'W1', day(200), 4, 1000, 2000);
+  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 2, unit: 'sheet' }], payment_method: 'cash', cash_received: 4000 });
+  assert.equal(core.getInvoice(db, r.id).grand_total, 4000); assert.equal(qty(b), 2);
+});
+
 test('expired batches are blocked by the backend (FEFO path and explicit batch)', () => {
   const p = prod('Exp');
   const bad = batch(p, 'OLD', day(-1), 10, 100, 300);

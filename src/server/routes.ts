@@ -164,14 +164,15 @@ export function createRouter() {
 
   // ─────────── Products / batches ───────────
   const productSelect = `
-    SELECT p.*, COALESCE(s.stock,0) stock, COALESCE(s.total_stock,0) total_stock,
+    SELECT p.*, COALESCE(s.stock,0) stock, COALESCE(s.total_stock,0) total_stock, COALESCE(s.loose,0) loose,
       s.nearest_expiry, f.selling_price price, f.purchase_price cost
     FROM products p
     LEFT JOIN (SELECT product_id,
         SUM(CASE WHEN expiry_date >= @today THEN quantity ELSE 0 END) stock, SUM(quantity) total_stock,
+        SUM(CASE WHEN expiry_date >= @today THEN loose_units ELSE 0 END) loose,
         MIN(CASE WHEN expiry_date >= @today AND quantity > 0 THEN expiry_date END) nearest_expiry
       FROM batches WHERE branch_id = @branch GROUP BY product_id) s ON s.product_id = p.id
-    LEFT JOIN batches f ON f.id = (SELECT id FROM batches WHERE product_id = p.id AND branch_id = @branch AND quantity > 0 AND expiry_date >= @today
+    LEFT JOIN batches f ON f.id = (SELECT id FROM batches WHERE product_id = p.id AND branch_id = @branch AND (quantity > 0 OR loose_units > 0) AND expiry_date >= @today
         ORDER BY expiry_date, id LIMIT 1)`;
 
   r.get('/products', wrap((req) => {
@@ -212,6 +213,10 @@ export function createRouter() {
     category: b.category || null, manufacturer: b.manufacturer || null, dosage: b.dosage || null, form: b.form || null,
     unit: b.unit || 'tablet', shelf_rack: b.shelf_rack || null, is_rx: b.is_rx ? 1 : 0, reorder_level: int(b.reorder_level ?? 10),
     supplier_id: b.supplier_id ? int(b.supplier_id) : null,
+    sheets_per_pack: Math.max(1, int(b.sheets_per_pack) || 1),
+    sheet_price: b.sheet_price !== undefined && b.sheet_price !== null && String(b.sheet_price) !== '' && int(b.sheet_price) > 0 ? int(b.sheet_price) : null,
+    tablets_per_sheet: Math.max(1, int(b.tablets_per_sheet) || 1),
+    tablet_price: b.tablet_price !== undefined && b.tablet_price !== null && String(b.tablet_price) !== '' && int(b.tablet_price) > 0 ? int(b.tablet_price) : null,
   });
   const dupBarcode = (e: any) => { if (String(e?.code).startsWith('SQLITE_CONSTRAINT')) throw new BizError('This barcode is already used by another medicine.'); throw e; };
 
@@ -220,8 +225,8 @@ export function createRouter() {
     if (!f.brand_name) throw new BizError('Brand name is required.');
     if (!f.barcode) f.barcode = ean13();
     try {
-      const id = Number(db().prepare(`INSERT INTO products (barcode,brand_name,generic_name,category,manufacturer,dosage,form,unit,shelf_rack,is_rx,reorder_level,supplier_id)
-        VALUES (@barcode,@brand_name,@generic_name,@category,@manufacturer,@dosage,@form,@unit,@shelf_rack,@is_rx,@reorder_level,@supplier_id)`).run(f).lastInsertRowid);
+      const id = Number(db().prepare(`INSERT INTO products (barcode,brand_name,generic_name,category,manufacturer,dosage,form,unit,shelf_rack,is_rx,reorder_level,supplier_id,sheets_per_pack,sheet_price,tablets_per_sheet,tablet_price)
+        VALUES (@barcode,@brand_name,@generic_name,@category,@manufacturer,@dosage,@form,@unit,@shelf_rack,@is_rx,@reorder_level,@supplier_id,@sheets_per_pack,@sheet_price,@tablets_per_sheet,@tablet_price)`).run(f).lastInsertRowid);
       audit(db(), actor(req), 'products', 'PRODUCT_CREATE', { id, ...f });
       return { id };
     } catch (e) { return dupBarcode(e); }
@@ -230,10 +235,14 @@ export function createRouter() {
     const f = productFields(req.body);
     if (!f.brand_name) throw new BizError('Brand name is required.');
     if (!f.barcode) f.barcode = ean13();
-    const before = db().prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
+    const before = db().prepare('SELECT * FROM products WHERE id = ?').get(req.params.id) as any;
+    if (before && (int(before.sheets_per_pack) !== f.sheets_per_pack || int(before.tablets_per_sheet ?? 1) !== f.tablets_per_sheet)) {
+      const open = db().prepare('SELECT COALESCE(SUM(loose_units),0) n FROM batches WHERE product_id = ?').get(req.params.id) as any;
+      if (open.n > 0) throw new BizError('This medicine has an opened pack (loose sheets/tablets). Sell them before changing sheets per pack or tablets per sheet.');
+    }
     try {
       db().prepare(`UPDATE products SET barcode=@barcode,brand_name=@brand_name,generic_name=@generic_name,category=@category,manufacturer=@manufacturer,
-        dosage=@dosage,form=@form,unit=@unit,shelf_rack=@shelf_rack,is_rx=@is_rx,reorder_level=@reorder_level,supplier_id=@supplier_id WHERE id=@id`).run({ ...f, id: req.params.id });
+        dosage=@dosage,form=@form,unit=@unit,shelf_rack=@shelf_rack,is_rx=@is_rx,reorder_level=@reorder_level,supplier_id=@supplier_id,sheets_per_pack=@sheets_per_pack,sheet_price=@sheet_price,tablets_per_sheet=@tablets_per_sheet,tablet_price=@tablet_price WHERE id=@id`).run({ ...f, id: req.params.id });
     } catch (e) { return dupBarcode(e); }
     audit(db(), actor(req), 'products', 'PRODUCT_UPDATE', { before, after: f });
     return { ok: true };

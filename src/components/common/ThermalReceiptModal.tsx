@@ -30,7 +30,7 @@ export function ThermalReceiptModal({ invoiceId, onClose }: { invoiceId: number;
             {inv.items.map((i: any) => (
               <div key={i.id} style={{ marginBottom: 3 }}>
                 <div>{i.brand_name} {i.dosage ?? ''}</div>
-                <div className="row"><span>{i.quantity} × {num(i.unit_price)}</span><span>{num(i.total_amount)}</span></div>
+                <div className="row"><span>{i.quantity}{i.pack_size > 1 ? ` ${t(`unit_${i.sale_unit}`)}` : ''} × {num(i.unit_price)}</span><span>{num(i.total_amount)}</span></div>
               </div>
             ))}
             <hr />
