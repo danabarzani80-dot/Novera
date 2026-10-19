@@ -50,7 +50,7 @@ export function supplierBalance(db: DB, supplierId: number): number {
 
 // ───────────────────────── Checkout (FEFO) ─────────────────────────
 export interface CheckoutInput {
-  items: { product_id: number; quantity: number; batch_id?: number }[];
+  items: { product_id: number; quantity: number; batch_id?: number; unit_price?: number }[];
   customer_id?: number | null;
   payment_method: 'cash' | 'card' | 'mixed' | 'qarz';
   cash_received?: number;
@@ -70,13 +70,20 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
     type Line = { product_id: number; batch_id: number; quantity: number; unit_price: number; purchase_price: number; total: number };
     const lines: Line[] = [];
     // Aggregate requested quantity per product (and per explicit batch).
-    const wanted = new Map<string, { product_id: number; batch_id?: number; quantity: number }>();
+    const wanted = new Map<string, { product_id: number; batch_id?: number; quantity: number; unit_price?: number }>();
     for (const it of input.items) {
       const q = int(it.quantity);
       if (q <= 0) throw new BizError('Quantity must be greater than zero.');
       const key = `${it.product_id}:${it.batch_id ?? ''}`;
       const w = wanted.get(key);
-      if (w) w.quantity += q; else wanted.set(key, { product_id: it.product_id, batch_id: it.batch_id, quantity: q });
+      // Optional price override typed by the cashier (flexible pricing).
+      let override: number | undefined;
+      if (it.unit_price !== undefined && it.unit_price !== null && String(it.unit_price) !== '') {
+        override = int(it.unit_price);
+        if (override < 0) throw new BizError('Price cannot be negative.');
+      }
+      if (w) { w.quantity += q; if (override !== undefined) w.unit_price = override; }
+      else wanted.set(key, { product_id: it.product_id, batch_id: it.batch_id, quantity: q, unit_price: override });
     }
 
     for (const w of wanted.values()) {
@@ -91,7 +98,7 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
           throw new BizError(`Sale blocked: batch ${b.batch_number} of ${product.brand_name} is expired (${b.expiry_date}).`, 'EXPIRED_BATCH');
         }
         if (b.quantity < w.quantity) throw new BizError(`Not enough stock in batch ${b.batch_number} of ${product.brand_name}.`, 'NO_STOCK');
-        lines.push({ product_id: w.product_id, batch_id: b.id, quantity: w.quantity, unit_price: b.selling_price, purchase_price: b.purchase_price, total: b.selling_price * w.quantity });
+        { const price = w.unit_price ?? b.selling_price; lines.push({ product_id: w.product_id, batch_id: b.id, quantity: w.quantity, unit_price: price, purchase_price: b.purchase_price, total: price * w.quantity }); }
         continue;
       }
 
@@ -103,7 +110,8 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
       for (const b of batches) {
         if (remaining <= 0) break;
         const take = Math.min(remaining, b.quantity);
-        lines.push({ product_id: w.product_id, batch_id: b.id, quantity: take, unit_price: b.selling_price, purchase_price: b.purchase_price, total: b.selling_price * take });
+        const price = w.unit_price ?? b.selling_price;
+        lines.push({ product_id: w.product_id, batch_id: b.id, quantity: take, unit_price: price, purchase_price: b.purchase_price, total: price * take });
         remaining -= take;
       }
       if (remaining > 0) {

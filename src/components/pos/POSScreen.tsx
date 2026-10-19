@@ -58,7 +58,7 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
         if (ex.quantity >= ex.max) { toast(t('err_not_enough_stock'), 'error'); return c; }
         return { ...c, lines: c.lines.map((l) => (l.product_id === p.id ? { ...l, quantity: l.quantity + 1 } : l)) };
       }
-      return { ...c, lines: [...c.lines, { product_id: p.id, name: p.brand_name, dosage: p.dosage, unit_price: p.price ?? 0, quantity: 1, max: p.stock ?? 0 }] };
+      return { ...c, lines: [...c.lines, { product_id: p.id, name: p.brand_name, dosage: p.dosage, unit_price: p.price ?? 0, list_price: p.price ?? 0, quantity: 1, max: p.stock ?? 0 }] };
     }));
   }, [active, toast, t]);
 
@@ -77,6 +77,10 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
 
   const setQty = (pid: number, qty: number) => patch({
     lines: cart.lines.map((l) => (l.product_id === pid ? { ...l, quantity: Math.max(1, Math.min(l.max, qty)) } : l)),
+  });
+
+  const setPrice = (pid: number, price: number) => patch({
+    lines: cart.lines.map((l) => (l.product_id === pid ? { ...l, unit_price: Math.max(0, price) } : l)),
   });
 
   const subtotal = cart.lines.reduce((s, l) => s + l.unit_price * l.quantity, 0);
@@ -122,7 +126,7 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
 
   const doCheckout = async () => {
     const r = await run(() => api.post('/checkout', {
-      items: cart.lines.map((l) => ({ product_id: l.product_id, quantity: l.quantity })),
+      items: cart.lines.map((l) => ({ product_id: l.product_id, quantity: l.quantity, unit_price: l.unit_price })),
       customer_id: cart.customer?.id ?? null, payment_method: cart.method,
       cash_received: cart.method === 'card' ? 0 : received || (cart.method === 'qarz' ? 0 : cashDue),
       card_amount: cart.method === 'mixed' ? cardAmt : 0,
@@ -256,7 +260,10 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
                       <button className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 flex items-center justify-center" onClick={() => setQty(l.product_id, l.quantity - 1)}><Minus size={14} /></button>
                       <input className="w-12 text-center text-sm font-bold border rounded-lg py-1" value={l.quantity} onChange={(e) => setQty(l.product_id, parseNum(e.target.value) || 1)} />
                       <button className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 flex items-center justify-center" onClick={() => setQty(l.product_id, l.quantity + 1)}><Plus size={14} /></button>
-                      <span className="text-xs text-slate-500 ms-2">× {iqd(l.unit_price)}</span>
+                      <span className="text-xs text-slate-500 ms-2">×</span>
+                      <input className={`w-20 text-center text-sm font-bold border rounded-lg py-1 ${l.list_price !== undefined && l.unit_price !== l.list_price ? 'border-amber-400 bg-amber-50' : ''}`}
+                        inputMode="numeric" title={t('selling_price')} value={l.unit_price}
+                        onFocus={(e) => e.target.select()} onChange={(e) => setPrice(l.product_id, parseNum(e.target.value))} />
                     </div>
                     <b className="text-sm">{iqd(l.unit_price * l.quantity)}</b>
                   </div>

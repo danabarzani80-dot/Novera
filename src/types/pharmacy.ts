@@ -40,5 +40,5 @@ export interface Product {
 }
 
 export interface CartLine {
-  product_id: number; name: string; dosage?: string | null; unit_price: number; quantity: number; max: number;
+  product_id: number; name: string; dosage?: string | null; unit_price: number; list_price?: number; quantity: number; max: number;
 }
