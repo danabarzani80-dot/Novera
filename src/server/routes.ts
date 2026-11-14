@@ -110,6 +110,15 @@ export function createRouter() {
   r.post('/auth/logout', wrap((_req, res) => { res.clearCookie('token'); return { ok: true }; }));
 
   r.use(needAuth);
+  // Cashiers and doctors never receive cost prices (the basis of cost of goods sold and profit).
+  r.use((req, res, next) => {
+    if (req.user!.role !== 'cashier' && req.user!.role !== 'doctor') return next();
+    const strip = (v: any): any => Array.isArray(v) ? v.map(strip)
+      : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([k]) => !['cost', 'purchase_price', 'cost_price', 'total_cost'].includes(k)).map(([k, x]) => [k, strip(x)])) : v;
+    const json = res.json.bind(res);
+    res.json = (body: any) => json(strip(body));
+    next();
+  });
 
   r.get('/auth/me', wrap((req) => {
     const name = (db().prepare("SELECT value FROM settings WHERE key='pharmacy_name'").get() as any)?.value ?? '';
@@ -189,7 +198,7 @@ export function createRouter() {
     const suppliers = db().prepare('SELECT id, name FROM suppliers WHERE branch_id = ?').all(branch) as any[];
     const dueSuppliers = suppliers.map((s) => ({ name: s.name, balance: core.supplierBalance(db(), s.id) })).filter((s) => s.balance > 0);
     return {
-      revenue: p.net_revenue, receipts: p.receipts, net_profit: p.net_profit,
+      revenue: p.net_revenue, receipts: p.receipts, net_profit: isAdmin(req) ? p.net_profit : null, // profit is admin-only
       expired: c.expired, critical: c.critical, qarz, overdue_customers: overdue, products,
       recent, alerts: { low_stock: lowCount, low_items: low, expired: c.expired, critical: c.critical, overdue_customers: overdue,
         suppliers_due: dueSuppliers.length, suppliers_due_total: dueSuppliers.reduce((s, x) => s + x.balance, 0) },
@@ -261,6 +270,9 @@ export function createRouter() {
       ON CONFLICT(product_id,branch_id) DO UPDATE SET sheet_price=excluded.sheet_price, tablet_price=excluded.tablet_price,
       reorder_level=excluded.reorder_level, supplier_id=excluded.supplier_id`).run(productId, branchId, f.sheet_price, f.tablet_price, f.reorder_level, f.supplier_id);
   };
+  const usedByOtherBranch = (productId: unknown, branchId: number) => !!db().prepare(`SELECT 1 FROM batches WHERE product_id = ? AND branch_id <> ? UNION ALL
+    SELECT 1 FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id WHERE ii.product_id = ? AND i.branch_id <> ? LIMIT 1`)
+    .get(productId, branchId, productId, branchId);
   const dupBarcode = (e: any) => { if (String(e?.code).startsWith('SQLITE_CONSTRAINT')) throw new BizError('This barcode is already used by another medicine.'); throw e; };
 
   r.post('/products', need('products'), wrap((req) => {
@@ -282,6 +294,12 @@ export function createRouter() {
     const before = db().prepare(`SELECT p.*, pb.sheet_price, pb.tablet_price, COALESCE(pb.reorder_level, p.reorder_level) reorder_level, pb.supplier_id
       FROM products p LEFT JOIN product_branch pb ON pb.product_id = p.id AND pb.branch_id = ? WHERE p.id = ?`).get(branchOf(req), req.params.id) as any;
     if (!before) throw new BizError('Medicine not found.', 'NOT_FOUND', 404);
+    // The catalogue is shared. Staff can always change their own branch's prices/reorder/supplier, but only
+    // the admin can rename or re-barcode a medicine that the other branch also stocks or has sold.
+    const shared = ['barcode', 'brand_name', 'generic_name', 'category', 'manufacturer', 'dosage', 'form', 'unit', 'shelf_rack', 'is_rx', 'sheets_per_pack', 'tablets_per_sheet'] as const;
+    const norm = (v: unknown) => (v === null || v === undefined || v === '' ? null : String(v));
+    if (!isAdmin(req) && shared.some((k) => norm((before as any)[k]) !== norm((f as any)[k])) && usedByOtherBranch(req.params.id, branchOf(req)))
+      throw new BizError('This medicine is also used by another branch. Only the admin can change its name, barcode or pack details.', 'FORBIDDEN', 403);
     if (before && (int(before.sheets_per_pack) !== f.sheets_per_pack || int(before.tablets_per_sheet ?? 1) !== f.tablets_per_sheet)) {
       const open = db().prepare('SELECT COALESCE(SUM(loose_units),0) n FROM batches WHERE product_id = ?').get(req.params.id) as any;
       if (open.n > 0) throw new BizError('This medicine has an opened pack (loose sheets/tablets). Sell them before changing sheets per pack or tablets per sheet.');
@@ -299,10 +317,7 @@ export function createRouter() {
   }));
   r.delete('/products/:id', need('products'), wrap((req) => {
     // The catalogue is shared, so a branch can't remove a medicine another branch stocks or has sold.
-    const other = db().prepare(`SELECT 1 FROM batches WHERE product_id = ? AND branch_id <> ? UNION ALL
-      SELECT 1 FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id WHERE ii.product_id = ? AND i.branch_id <> ? LIMIT 1`)
-      .get(req.params.id, branchOf(req), req.params.id, branchOf(req));
-    if (other) throw new BizError('This medicine is used by another branch, so it cannot be deleted from here.');
+    if (usedByOtherBranch(req.params.id, branchOf(req))) throw new BizError('This medicine is used by another branch, so it cannot be deleted from here.');
     const used = db().prepare('SELECT 1 FROM invoice_items WHERE product_id = ? LIMIT 1').get(req.params.id);
     if (used) db().prepare('UPDATE products SET active = 0 WHERE id = ?').run(req.params.id);
     else db().prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
@@ -349,6 +364,7 @@ export function createRouter() {
   r.get('/invoices/:id', need('pos', 'returns', 'shifts', 'dashboard'), wrap((req) => {
     const inv = core.getInvoice(db(), int(req.params.id));
     if (!inv || inv.branch_id !== branchOf(req)) throw new BizError('Invoice not found.', 'NOT_FOUND', 404);
+    if (!isAdmin(req)) inv.items = inv.items.map(({ purchase_price, ...x }: any) => x); // cost of goods sold is admin-only
     return inv;
   }));
 
@@ -474,7 +490,10 @@ export function createRouter() {
   r.get('/adjustments', need('adjust'), wrap((req) => db().prepare(`SELECT a.*, p.brand_name, b.batch_number, u.name user_name FROM stock_adjustments a
     JOIN products p ON p.id = a.product_id JOIN batches b ON b.id = a.batch_id LEFT JOIN users u ON u.id = a.user_id WHERE b.branch_id = ? ORDER BY a.id DESC LIMIT 100`).all(branchOf(req))));
 
-  r.get('/branches', need('pos', 'products', 'adjust', 'expiry', 'receive', 'rtv', 'transfers', 'supplier'), wrap(() => db().prepare('SELECT * FROM branches ORDER BY id').all()));
+  // Staff only ever see their own branch; the admin sees all of them.
+  r.get('/branches', need('pos', 'products', 'adjust', 'expiry', 'receive', 'rtv', 'transfers', 'supplier'), wrap((req) => isAdmin(req)
+    ? db().prepare('SELECT * FROM branches ORDER BY id').all()
+    : db().prepare('SELECT * FROM branches WHERE id = ?').all(branchOf(req))));
   r.post('/branches', need('branches'), wrap((req) => {
     if (!String(req.body.name ?? '').trim()) throw new BizError('Branch name is required.');
     const id = Number(db().prepare('INSERT INTO branches (name,address,phone) VALUES (?,?,?)').run(req.body.name.trim(), req.body.address || null, req.body.phone || null).lastInsertRowid);
@@ -569,6 +588,7 @@ export function createRouter() {
 
   // ─────────── Accounting ───────────
   r.get('/pnl', need('accounting'), wrap((req) => {
+    if (!isAdmin(req)) throw new BizError('Only the admin can see profit reports.', 'FORBIDDEN', 403);
     const from = String(req.query.from || todayStr(new Date(Date.now() - 29 * 86400_000)));
     const to = String(req.query.to || todayStr());
     const total = core.profitAndLoss(db(), from, to, branchOf(req));
@@ -600,6 +620,7 @@ export function createRouter() {
     if (!ROLES.includes(b.role)) throw new BizError('Choose a role.');
     if (!b.name || !b.username || !b.password) throw new BizError('Name, username and password are required.');
     if (String(b.password).length < 8) throw new BizError('Password must be at least 8 characters.');
+    if (b.role !== 'super_admin' && !db().prepare('SELECT 1 FROM branches WHERE id = ?').get(int(b.branch_id))) throw new BizError('Choose the branch this user works in.');
     try {
       const id = Number(db().prepare('INSERT INTO users (name,username,password_hash,role,branch_id,specialty) VALUES (?,?,?,?,?,?)')
         .run(b.name, String(b.username).trim().toLowerCase(), bcrypt.hashSync(b.password, 10), b.role, b.branch_id || null, b.role === 'doctor' ? b.specialty || null : null).lastInsertRowid);
@@ -614,6 +635,7 @@ export function createRouter() {
     if (b.role && !ROLES.includes(b.role)) throw new BizError('Choose a role.');
     const u = db().prepare('SELECT * FROM users WHERE id = ?').get(id) as any;
     if (!u) throw new BizError('User not found.', 'NOT_FOUND', 404);
+    if (b.branch_id !== undefined && b.branch_id !== null && !db().prepare('SELECT 1 FROM branches WHERE id = ?').get(int(b.branch_id))) throw new BizError('Choose the branch this user works in.');
     db().prepare('UPDATE users SET name=?, role=?, branch_id=?, specialty=?, active=? WHERE id=?')
       .run(b.name ?? u.name, b.role ?? u.role, b.branch_id ?? u.branch_id, b.specialty ?? u.specialty, b.active === undefined ? u.active : (b.active ? 1 : 0), id);
     if (b.password) {

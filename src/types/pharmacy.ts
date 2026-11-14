@@ -14,9 +14,11 @@ const ALL: Module[] = [
 
 export const ROLE_MODULES: Record<Role, Module[]> = {
   super_admin: ALL,
-  pharmacist: ALL.filter((m) => !['branches', 'users', 'audit'].includes(m)),
+  // Each branch is a separate pharmacy: moving stock between branches is admin-only.
+  // Profit, net profit and cost of goods sold (accounting / P&L) are admin-only.
+  pharmacist: ALL.filter((m) => !['branches', 'users', 'audit', 'transfers', 'accounting'].includes(m)),
   cashier: ['dashboard', 'pos', 'returns', 'customers', 'shifts'],
-  warehouse_manager: ['dashboard', 'products', 'barcode', 'transfers', 'adjust', 'expiry', 'receive', 'rtv', 'supplier'],
+  warehouse_manager: ['dashboard', 'products', 'barcode', 'adjust', 'expiry', 'receive', 'rtv', 'supplier'],
   doctor: ['doctor'],
 };
 

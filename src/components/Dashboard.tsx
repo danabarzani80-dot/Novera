@@ -33,7 +33,7 @@ export default function Dashboard({ onNavigate }: { onNavigate: (m: Module) => v
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <StatCard title={t('total_revenue')} tone="blue" icon={<TrendingUp />} value={iqd(d.revenue)}
               sub={<div className="flex items-center justify-between"><Badge tone="green">+{d.receipts} {t('receipts')}</Badge>
-                <span className="font-bold text-emerald-600">{t('net_profit')}: {iqd(d.net_profit)}</span></div>} />
+                {d.net_profit != null && <span className="font-bold text-emerald-600">{t('net_profit')}: {iqd(d.net_profit)}</span>}</div>} />
             <StatCard title={t('nav_expiry')} tone="red" icon={<AlertTriangle />} valueClass="text-red-600"
               value={`${d.expired} ${t('medicines')}`} sub={<span className="text-slate-500">{t('more_close_expiry', { n: d.critical })}</span>} />
             <StatCard title={t('nav_customers')} tone="amber" icon={<Users />} value={iqd(d.qarz)}
