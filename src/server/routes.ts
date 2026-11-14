@@ -181,9 +181,9 @@ export function createRouter() {
     const products = (db().prepare('SELECT COUNT(*) c FROM products WHERE active=1').get() as any).c;
     const recent = db().prepare(`SELECT i.id, i.invoice_number, i.created_at, i.grand_total, i.payment_method, u.name cashier
       FROM invoices i JOIN users u ON u.id = i.user_id WHERE i.branch_id = ? ORDER BY i.id DESC LIMIT 8`).all(branch);
-    const low = db().prepare(`SELECT p.brand_name, COALESCE(pb.reorder_level, p.reorder_level) reorder_level, COALESCE(SUM(CASE WHEN b.expiry_date >= ? THEN b.quantity END),0) stock
+    const low = (db().prepare(`SELECT p.brand_name, COALESCE(pb.reorder_level, p.reorder_level) rl, COALESCE(SUM(CASE WHEN b.expiry_date >= ? THEN b.quantity END),0) stock
       FROM products p LEFT JOIN batches b ON b.product_id = p.id AND b.branch_id = ? LEFT JOIN product_branch pb ON pb.product_id = p.id AND pb.branch_id = ? WHERE p.active=1
-      GROUP BY p.id HAVING stock <= reorder_level ORDER BY stock ASC LIMIT 5`).all(today, branch, branch) as any[];
+      GROUP BY p.id HAVING stock <= rl ORDER BY stock ASC LIMIT 5`).all(today, branch, branch) as any[]).map(({ rl, ...x }) => ({ ...x, reorder_level: rl }));
     const lowCount = (db().prepare(`SELECT COUNT(*) c FROM (SELECT p.id, COALESCE(SUM(CASE WHEN b.expiry_date >= ? THEN b.quantity END),0) stock, COALESCE(pb.reorder_level, p.reorder_level) rl
       FROM products p LEFT JOIN batches b ON b.product_id = p.id AND b.branch_id = ? LEFT JOIN product_branch pb ON pb.product_id = p.id AND pb.branch_id = ? WHERE p.active=1 GROUP BY p.id) WHERE stock <= rl`).get(today, branch, branch) as any).c;
     const suppliers = db().prepare('SELECT id, name FROM suppliers WHERE branch_id = ?').all(branch) as any[];
