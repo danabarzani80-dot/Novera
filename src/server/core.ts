@@ -1,4 +1,5 @@
 import type { DB } from '../db/database';
+import { DISCOUNT_ROLES, NOTE_STEP, checkDiscount, cleanPct, discountCap, discountSettingKey, type DiscountRole } from '../lib/discount';
 
 export class BizError extends Error {
   status: number;
@@ -59,6 +60,33 @@ export interface CheckoutInput {
   discount_amount?: number;
   extra_amount?: number; // amount added on top (flexible pricing)
   prescription_id?: number | null;
+}
+
+// ───────────────────────── Discount limits ─────────────────────────
+/** Max discount % for a role, from Settings. Admin is unlimited (100). Unset or other roles = 0. */
+export function maxDiscountPct(db: DB, role: string): number {
+  if (role === 'super_admin') return 100;
+  if (!(DISCOUNT_ROLES as readonly string[]).includes(role)) return 0;
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(discountSettingKey(role as DiscountRole)) as any;
+  return cleanPct(row?.value);
+}
+
+export function getDiscountLimits(db: DB): Record<DiscountRole, number> {
+  return Object.fromEntries(DISCOUNT_ROLES.map((r) => [r, maxDiscountPct(db, r)])) as Record<DiscountRole, number>;
+}
+
+export function setDiscountLimits(db: DB, actor: Actor, input: Partial<Record<DiscountRole, unknown>>) {
+  if (actor.role !== 'super_admin') throw new BizError('Only the admin can change discount limits.', 'FORBIDDEN', 403);
+  const before = getDiscountLimits(db);
+  for (const r of DISCOUNT_ROLES) {
+    if (input[r] === undefined) continue;
+    const n = Number(input[r]);
+    if (!Number.isInteger(n) || n < 0 || n > 100) throw new BizError(`Maximum discount for ${r} must be a whole number from 0 to 100.`);
+    db.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)').run(discountSettingKey(r), String(n));
+  }
+  const after = getDiscountLimits(db);
+  audit(db, actor, 'admin', 'DISCOUNT_LIMITS_UPDATE', { before, after });
+  return after;
 }
 
 export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
@@ -159,8 +187,19 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
     }
 
     const subtotal = lines.reduce((s, l) => s + l.total, 0);
-    // Discounts are disabled: every sale is charged at full price (discount_pct / discount_amount are ignored).
-    const discount = 0;
+    // Discounts: dinars only, in 250 IQD steps, up to the role's cap (subtotal × role %, rounded down to 250).
+    // discount_pct is never used — the till only sends a dinar amount.
+    const discount = input.discount_amount === undefined || input.discount_amount === null ? 0 : Number(input.discount_amount);
+    const pctLimit = maxDiscountPct(db, actor.role);
+    const cap = discountCap(subtotal, actor.role, pctLimit);
+    const problem = checkDiscount(discount, cap);
+    if (problem === 'not_whole') throw new BizError('Discount must be a whole dinar amount.', 'DISCOUNT_INVALID');
+    if (problem === 'step') throw new BizError(`Discount must be in steps of ${NOTE_STEP} IQD.`, 'DISCOUNT_INVALID');
+    if (problem === 'cap') {
+      throw new BizError(cap === 0
+        ? 'You are not allowed to give a discount on this sale.'
+        : `Discount is above your limit. The most you can give on this sale is ${cap.toLocaleString('en-US')} IQD.`, 'DISCOUNT_OVER_LIMIT');
+    }
     const extra = Math.max(0, int(input.extra_amount));
     const grand = subtotal - discount + extra;
 
@@ -207,7 +246,11 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
     }
     if (input.prescription_id) db.prepare("UPDATE prescriptions SET status='dispensed' WHERE id = ?").run(input.prescription_id);
 
-    audit(db, actor, 'pos', 'POS_CHECKOUT', { invoice: invoiceNumber, total: grand, method, lines: lines.length });
+    const by = discount > 0 ? (db.prepare('SELECT username FROM users WHERE id = ?').get(actor.id) as any)?.username ?? null : null;
+    audit(db, actor, 'pos', 'POS_CHECKOUT', {
+      invoice: invoiceNumber, subtotal, total: grand, method, lines: lines.length,
+      discount, discount_by: discount > 0 ? { user_id: actor.id, username: by, role: actor.role, limit_pct: pctLimit, cap } : null,
+    });
     return { id: invoiceId, invoice_number: invoiceNumber };
   })();
 }

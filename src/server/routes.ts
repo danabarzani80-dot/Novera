@@ -110,10 +110,20 @@ export function createRouter() {
     return { ok: true };
   }));
   r.put('/settings', need('users'), wrap((req) => {
+    if (req.body?.pharmacy_name === undefined) return { ok: true };
     db().prepare("INSERT OR REPLACE INTO settings (key,value) VALUES ('pharmacy_name',?)").run(String(req.body?.pharmacy_name ?? '').slice(0, 80));
-    audit(db(), actor(req), 'admin', 'SETTINGS_UPDATE', req.body);
+    audit(db(), actor(req), 'admin', 'SETTINGS_UPDATE', { pharmacy_name: req.body.pharmacy_name });
     return { ok: true };
   }));
+  // Discount limits: admin-only settings (max % per role). The till reads only its own limit.
+  r.get('/settings/discount-limits', need('users'), wrap((req) => {
+    if (req.user!.role !== 'super_admin') throw new BizError('Only the admin can view discount limits.', 'FORBIDDEN', 403);
+    return core.getDiscountLimits(db());
+  }));
+  r.put('/settings/discount-limits', need('users'), wrap((req) => core.setDiscountLimits(db(), actor(req), req.body ?? {})));
+  r.get('/pos/discount-limit', need('pos'), wrap((req) => ({
+    role: req.user!.role, unlimited: req.user!.role === 'super_admin', pct: core.maxDiscountPct(db(), req.user!.role),
+  })));
 
   // ─────────── Badges / dashboard ───────────
   const expiryCounts = (branch: number) => {

@@ -7,20 +7,23 @@ import { useAuth } from '../../lib/auth';
 import { api, qs } from '../../lib/api';
 import { iqd, parseNum, stockText } from '../../lib/format';
 import type { CartLine, Product } from '../../types/pharmacy';
-import { Badge, Empty, Modal, Skeleton, useAction, useDebounced, useToast } from '../common/ui';
+import { Badge, Empty, Modal, Skeleton, useAction, useDebounced, useLoad, useToast } from '../common/ui';
+import { NOTE_STEP, checkDiscount, discountCap } from '../../lib/discount';
 import { ThermalReceiptModal } from '../common/ThermalReceiptModal';
 import { ShiftDialog } from '../common/Shell';
 import { AlternativeMedicineModal } from './AlternativeMedicineModal';
 import { CheckoutModal } from './CheckoutModal';
 
 type Method = 'cash' | 'card' | 'mixed' | 'qarz';
-interface Cart { id: number; lines: CartLine[]; customer: { id: number; name: string } | null; discPct: string; discAmt: string; method: Method; received: string; card: string; keepExtra?: boolean; prescriptionId?: number }
-const emptyCart = (id: number): Cart => ({ id, lines: [], customer: null, discPct: '', discAmt: '', method: 'cash', received: '', card: '' });
+interface Cart { id: number; lines: CartLine[]; customer: { id: number; name: string } | null; discAmt: string; method: Method; received: string; card: string; keepExtra?: boolean; prescriptionId?: number }
+const emptyCart = (id: number): Cart => ({ id, lines: [], customer: null, discAmt: '', method: 'cash', received: '', card: '' });
 
 export default function POSScreen({ onSold }: { onSold: () => void }) {
   const { t } = useI18n();
   const { shift, refresh, user } = useAuth();
   const isAdmin = user?.role === 'super_admin'; // only the admin may see/change the price box
+  // This user's discount ceiling (% set by the admin; the server checks it again on every sale).
+  const discLimit = useLoad(() => api.get('/pos/discount-limit'), [user?.id]);
   const { toast } = useToast();
   const { run, busy } = useAction();
   const [carts, setCarts] = useState<Cart[]>([emptyCart(1)]);
@@ -109,9 +112,17 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
   });
 
   const subtotal = cart.lines.reduce((s, l) => s + l.unit_price * l.quantity, 0);
-  // Discounts are disabled: the sale is always charged at full price.
-  const discount = 0;
-  const baseTotal = subtotal;
+  // Discount: dinars only, 250 IQD steps, up to subtotal × role % rounded down to 250. Closed while the cap is 0.
+  const discCap = discLimit.data ? discountCap(subtotal, user?.role ?? '', discLimit.data.pct) : 0;
+  const discOpen = discCap > 0;
+  const discTyped = !discOpen || cart.discAmt.trim() === '' ? 0 : Number(cart.discAmt);
+  const discProblem = checkDiscount(discTyped, discCap);
+  const discount = discProblem ? 0 : discTyped;
+  const stepDisc = (dir: 1 | -1) => {
+    const base = discProblem ? Math.min(discCap, Math.floor(Math.max(0, discTyped || 0) / NOTE_STEP) * NOTE_STEP) : discTyped;
+    patch({ discAmt: String(Math.max(0, Math.min(discCap, base + dir * NOTE_STEP))) });
+  };
+  const baseTotal = subtotal - discount;
   const itemCount = cart.lines.reduce((s, l) => s + l.quantity, 0);
 
   const received = parseNum(cart.received);
@@ -143,6 +154,7 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
   const validate = (): string | null => {
     if (!shift) return t('err_no_shift');
     if (!cart.lines.length) return t('err_empty_cart');
+    if (discTyped !== 0 && discProblem) return discProblem === 'cap' ? t('err_discount_cap', { n: discCap.toLocaleString('en-US') }) : t('err_discount_step');
     if (cart.method === 'qarz' && !cart.customer) return t('err_qarz_customer');
     if (cart.method === 'cash' && received && received < total) return t('err_received_less');
     return null;
@@ -152,7 +164,7 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
     if (e) { toast(e, 'error'); if (!shift) setShowShift(true); return; }
     setConfirming(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cart, shift, total, received]);
+  }, [cart, shift, total, received, discCap]);
 
   const doCheckout = async () => {
     const r = await run(() => api.post('/checkout', {
@@ -161,7 +173,7 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
       customer_id: cart.customer?.id ?? null, payment_method: cart.method,
       cash_received: cart.method === 'card' ? 0 : received || (cart.method === 'qarz' ? 0 : cashDue),
       card_amount: cart.method === 'mixed' ? cardAmt : 0,
-      discount_pct: 0, discount_amount: 0, extra_amount: extra, prescription_id: cart.prescriptionId ?? null,
+      discount_amount: discount, extra_amount: extra, prescription_id: cart.prescriptionId ?? null,
     }));
     setConfirming(false);
     if (r) {
@@ -308,6 +320,21 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
         </div>
 
         <div className="border-t border-slate-200 p-3 space-y-3 bg-slate-50">
+          <div>
+            <div className="flex items-center justify-between">
+              <label className="label">{t('discount')} د.ع</label>
+              <span className="text-xs font-bold text-slate-500">{discOpen ? t('discount_up_to', { n: discCap.toLocaleString('en-US') }) : t('discount_not_available')}</span>
+            </div>
+            <div className="flex gap-1">
+              <button className="btn-ghost !px-2" disabled={!discOpen || discount <= 0} onClick={() => stepDisc(-1)} aria-label="-250"><Minus size={14} /></button>
+              <input className="input text-center" type="number" inputMode="numeric" min={0} max={discCap} step={NOTE_STEP} disabled={!discOpen}
+                value={discOpen ? cart.discAmt : ''} placeholder="0" onChange={(e) => patch({ discAmt: e.target.value })} />
+              <button className="btn-ghost !px-2" disabled={!discOpen || discount + NOTE_STEP > discCap} onClick={() => stepDisc(1)} aria-label="+250"><Plus size={14} /></button>
+            </div>
+            {discOpen && discTyped !== 0 && discProblem && (
+              <div className="mt-1 text-xs font-bold text-rose-600">{discProblem === 'cap' ? t('err_discount_cap', { n: discCap.toLocaleString('en-US') }) : t('err_discount_step')}</div>
+            )}
+          </div>
           <div className="flex items-end justify-between">
             <span className="text-xs text-slate-500">{t('items')}: <b>{itemCount}</b>{discount > 0 && <> • {t('discount')}: -{iqd(discount)}</>}</span>
             <span className="text-2xl font-extrabold text-blue-600">{iqd(total)}</span>

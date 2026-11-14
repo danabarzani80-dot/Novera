@@ -77,6 +77,7 @@ function Users() {
         <div className="card space-y-3"><h3 className="font-extrabold">{t('pharmacy_name')}</h3>
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
           <button className="btn-primary" disabled={!name.trim()} onClick={async () => { await run(() => api.put('/settings', { pharmacy_name: name }), t('saved')); refresh(); }}>{t('save')}</button></div>
+        {me?.role === 'super_admin' && <DiscountLimits />}
         <div className="card space-y-3"><h3 className="font-extrabold">{t('backup_restore')}</h3>
           <a className="btn-ghost" href="/api/backup"><Download size={16} />{t('export_backup')}</a>
           <input ref={fileRef} type="file" accept=".db,.sqlite" className="hidden" onChange={(e) => setRestoreFile(e.target.files?.[0] ?? null)} />
@@ -99,6 +100,34 @@ function Users() {
       {toggle && <Confirm danger={!!toggle.active} title={t(toggle.active ? 'deactivate' : 'activate')} message={toggle.name} onCancel={() => setToggle(null)}
         onConfirm={async () => { await run(() => api.put(`/users/${toggle.id}`, { active: !toggle.active }), t('saved')); setToggle(null); users.reload(); }} />}
       {restoreFile && <Confirm title={t('import_backup')} message={t('restore_warning')} onCancel={() => setRestoreFile(null)} onConfirm={doRestore} />}
+    </div>
+  );
+}
+
+// Admin-only: maximum discount % per role. 0 = that role cannot give any discount. Admin is unlimited.
+function DiscountLimits() {
+  const { t } = useI18n();
+  const { run, busy } = useAction();
+  const limits = useLoad(() => api.get('/settings/discount-limits'), []);
+  const [v, setV] = useState<{ cashier: string; pharmacist: string } | null>(null);
+  const val = v ?? (limits.data ? { cashier: String(limits.data.cashier), pharmacist: String(limits.data.pharmacist) } : null);
+  const ok = (x: string) => /^\d{1,3}$/.test(x.trim()) && Number(x) <= 100;
+  if (!val) return <div className="card"><Skeleton rows={2} /></div>;
+  return (
+    <div className="card space-y-3"><h3 className="font-extrabold">{t('discount_limits')}</h3>
+      <p className="text-xs text-slate-500">{t('discount_limits_sub')}</p>
+      {(['cashier', 'pharmacist'] as const).map((r) => (
+        <Field key={r} label={`${t('role_' + r)} — ${t('max_discount_pct')}`}>
+          <input className="input" type="number" inputMode="numeric" min={0} max={100} step={1} value={val[r]}
+            onChange={(e) => setV({ ...val, [r]: e.target.value })} />
+          {!ok(val[r]) && <p className="text-xs font-bold text-rose-600 mt-1">{t('err_pct_range')}</p>}
+        </Field>
+      ))}
+      <p className="text-xs text-slate-500">{t('discount_admin_unlimited')}</p>
+      <button className="btn-primary" disabled={busy || !ok(val.cashier) || !ok(val.pharmacist)} onClick={async () => {
+        const r = await run(() => api.put('/settings/discount-limits', { cashier: Number(val.cashier), pharmacist: Number(val.pharmacist) }), t('saved'));
+        if (r) { setV(null); limits.reload(); }
+      }}>{t('save')}</button>
     </div>
   );
 }

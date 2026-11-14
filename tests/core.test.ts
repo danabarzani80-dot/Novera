@@ -109,10 +109,12 @@ test('medicines with 1 sheet per pack behave exactly as before', () => {
   assert.equal(core.getInvoice(db, r.id).grand_total, 4000); assert.equal(qty(b), 2);
 });
 
-test('discounts are disabled: lower amount is rejected, discount fields are ignored', () => {
+test('discount limits default to 0: no discount, lower amount rejected, percentage ignored', () => {
   const p = prod('Lower'); batch(p, 'L1', day(200), 5, 1500, 3000);
-  throwsCode(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 2500, discount_amount: 500 }), 'BUSINESS_RULE');
-  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 3000, discount_pct: 50, discount_amount: 500 });
+  assert.deepEqual(core.getDiscountLimits(db), { cashier: 0, pharmacist: 0 });
+  throwsCode(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', discount_amount: 250 }), 'DISCOUNT_OVER_LIMIT');
+  throwsCode(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 2500 }), 'BUSINESS_RULE');
+  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 3000, discount_pct: 50 });
   const inv = core.getInvoice(db, r.id);
   assert.equal(inv.grand_total, 3000); assert.equal(inv.discount_amount, 0);
 });
@@ -141,7 +143,7 @@ test('failed checkout rolls everything back', () => {
 
 test('mixed payment and validation (no discount applied)', () => {
   const p = prod('Disc'); const b = batch(p, 'd', day(90), 50, 500, 1000);
-  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 10 }], payment_method: 'mixed', card_amount: 4000, cash_received: 10000, discount_pct: 10, discount_amount: 500 });
+  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 10 }], payment_method: 'mixed', card_amount: 4000, cash_received: 10000 });
   const inv = core.getInvoice(db, r.id);
   assert.equal(inv.subtotal, 10000); assert.equal(inv.discount_amount, 0); assert.equal(inv.grand_total, 10000);
   assert.equal(inv.card_amount, 4000); assert.equal(inv.cash_amount, 6000); assert.equal(inv.change_amount, 4000);
@@ -167,12 +169,50 @@ test('qarz needs a customer; balance, payments and returns-to-debt', () => {
 
 test('returns restock the original batch at full price', () => {
   const p = prod('Ret'); const b = batch(p, 'r', day(90), 10, 400, 1000);
-  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 4 }], payment_method: 'cash', discount_amount: 400 });
+  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 4 }], payment_method: 'cash' });
   assert.equal(qty(b), 6);
   const inv = core.getInvoice(db, r.id);
   const ret = core.createSalesReturn(db, actor, { invoice_id: r.id, items: [{ invoice_item_id: inv.items[0].id, quantity: 4 }], refund_method: 'cash' });
   assert.equal(ret.total, 4000);
   assert.equal(qty(b), 10);
+});
+
+test('discount limits: admin-only settings, 0-100 whole numbers', () => {
+  throwsCode(() => core.setDiscountLimits(db, actor, { cashier: 10 }), 'FORBIDDEN');
+  const admin = { id: uid, role: 'super_admin', branch_id: 1 };
+  throwsCode(() => core.setDiscountLimits(db, admin, { cashier: 101 }), 'BUSINESS_RULE');
+  throwsCode(() => core.setDiscountLimits(db, admin, { cashier: 2.5 }), 'BUSINESS_RULE');
+  throwsCode(() => core.setDiscountLimits(db, admin, { pharmacist: -1 }), 'BUSINESS_RULE');
+  assert.deepEqual(core.setDiscountLimits(db, admin, { cashier: 10 }), { cashier: 10, pharmacist: 0 });
+  const log = db.prepare("SELECT details_json FROM audit_logs WHERE action_code='DISCOUNT_LIMITS_UPDATE' ORDER BY id DESC").get() as any;
+  assert.deepEqual(JSON.parse(log.details_json).after, { cashier: 10, pharmacist: 0 });
+});
+
+test('discount cap = subtotal x role %, rounded down to 250; 250 steps only; checked on the server', () => {
+  // cashier is 10% from the previous test
+  const p = prod('Cap'); batch(p, 'cp', day(200), 50, 1000, 5250);
+  const sale = (discount_amount: number, a = actor) => core.checkout(db, a, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', discount_amount });
+  throwsCode(() => sale(750), 'DISCOUNT_OVER_LIMIT');   // 10% of 5,250 = 525 -> cap 500
+  throwsCode(() => sale(300), 'DISCOUNT_INVALID');      // not a 250 step
+  throwsCode(() => sale(-250), 'DISCOUNT_INVALID');
+  const r = sale(500);
+  const inv = core.getInvoice(db, r.id);
+  assert.equal(inv.subtotal, 5250); assert.equal(inv.discount_amount, 500); assert.equal(inv.grand_total, 4750);
+  const log = JSON.parse((db.prepare("SELECT details_json FROM audit_logs WHERE action_code='POS_CHECKOUT' ORDER BY id DESC").get() as any).details_json);
+  assert.equal(log.invoice, inv.invoice_number); assert.equal(log.discount, 500);
+  assert.equal(log.discount_by.user_id, uid); assert.equal(log.discount_by.username, 'c'); assert.equal(log.discount_by.cap, 500);
+  // No discount: nothing changes — 5,250 is paid as 5,250.
+  const r2 = core.getInvoice(db, sale(0).id);
+  assert.equal(r2.grand_total, 5250); assert.equal(r2.discount_amount, 0);
+  // Cap rounds down to 0 -> no discount possible on that sale.
+  const small = prod('Small'); batch(small, 'sm', day(200), 5, 500, 2000); // 10% of 2,000 = 200 -> cap 0
+  throwsCode(() => core.checkout(db, actor, { items: [{ product_id: small, quantity: 1 }], payment_method: 'cash', discount_amount: 250 }), 'DISCOUNT_OVER_LIMIT');
+  // Pharmacist has its own limit (still 0); admin is unlimited.
+  const ph = { id: uid, role: 'pharmacist', branch_id: 1 };
+  throwsCode(() => sale(250, ph), 'DISCOUNT_OVER_LIMIT');
+  const admin = { id: uid, role: 'super_admin', branch_id: 1 };
+  assert.equal(core.getInvoice(db, sale(5000, admin).id).grand_total, 250);
+  throwsCode(() => sale(5500, admin), 'DISCOUNT_OVER_LIMIT');
 });
 
 test('returns are blocked once 2 days have passed since the sale', () => {
