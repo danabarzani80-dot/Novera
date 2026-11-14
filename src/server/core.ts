@@ -105,17 +105,15 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
       const q = int(it.quantity);
       if (q <= 0) throw new BizError('Quantity must be greater than zero.');
       const unit: Unit = it.unit === 'sheet' || it.unit === 'tablet' ? it.unit : 'pack';
-      // Optional price override typed by the cashier (flexible pricing), per chosen unit.
-      let override: number | undefined;
+      // Prices can't be changed at the till by anyone (admin included): the catalogue price is always used.
+      // The only way to lower a sale is a discount within the admin-set limit.
       if (it.unit_price !== undefined && it.unit_price !== null && String(it.unit_price) !== '') {
-        override = int(it.unit_price);
-        if (override < 0) throw new BizError('Price cannot be negative.');
-        if (actor.role !== 'super_admin') throw new BizError('Only the admin can change prices.', 'FORBIDDEN', 403);
+        throw new BizError('Prices cannot be changed at the till. Use a discount within your limit instead.', 'FORBIDDEN', 403);
       }
       const key = `${it.product_id}:${it.batch_id ?? ''}:${unit}`;
       const w = wanted.get(key);
-      if (w) { w.quantity += q; if (override !== undefined) w.unit_price = override; }
-      else wanted.set(key, { product_id: it.product_id, batch_id: it.batch_id, quantity: q, unit_price: override, unit });
+      if (w) w.quantity += q;
+      else wanted.set(key, { product_id: it.product_id, batch_id: it.batch_id, quantity: q, unit });
     }
 
     // In-memory stock per batch for this sale, so packs, sheets and tablets of the same medicine never oversell.
