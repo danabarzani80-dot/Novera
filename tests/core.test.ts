@@ -109,11 +109,12 @@ test('medicines with 1 sheet per pack behave exactly as before', () => {
   assert.equal(core.getInvoice(db, r.id).grand_total, 4000); assert.equal(qty(b), 2);
 });
 
-test('sell at amount received (lower): difference recorded as discount', () => {
+test('discounts are disabled: lower amount is rejected, discount fields are ignored', () => {
   const p = prod('Lower'); batch(p, 'L1', day(200), 5, 1500, 3000);
-  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 2500, discount_amount: 500 });
+  throwsCode(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 2500, discount_amount: 500 }), 'BUSINESS_RULE');
+  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 3000, discount_pct: 50, discount_amount: 500 });
   const inv = core.getInvoice(db, r.id);
-  assert.equal(inv.grand_total, 2500); assert.equal(inv.change_amount, 0); assert.equal(inv.discount_amount, 500);
+  assert.equal(inv.grand_total, 3000); assert.equal(inv.discount_amount, 0);
 });
 
 test('expired batches are blocked by the backend (FEFO path and explicit batch)', () => {
@@ -138,12 +139,12 @@ test('failed checkout rolls everything back', () => {
   assert.equal((db.prepare('SELECT COUNT(*) c FROM invoices').get() as any).c, before);
 });
 
-test('discounts, mixed payment and validation', () => {
+test('mixed payment and validation (no discount applied)', () => {
   const p = prod('Disc'); const b = batch(p, 'd', day(90), 50, 500, 1000);
   const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 10 }], payment_method: 'mixed', card_amount: 4000, cash_received: 10000, discount_pct: 10, discount_amount: 500 });
   const inv = core.getInvoice(db, r.id);
-  assert.equal(inv.subtotal, 10000); assert.equal(inv.discount_amount, 1500); assert.equal(inv.grand_total, 8500);
-  assert.equal(inv.card_amount, 4000); assert.equal(inv.cash_amount, 4500); assert.equal(inv.change_amount, 5500);
+  assert.equal(inv.subtotal, 10000); assert.equal(inv.discount_amount, 0); assert.equal(inv.grand_total, 10000);
+  assert.equal(inv.card_amount, 4000); assert.equal(inv.cash_amount, 6000); assert.equal(inv.change_amount, 4000);
   assert.equal(qty(b), 40);
   assert.throws(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 5 }));
 });
@@ -164,14 +165,26 @@ test('qarz needs a customer; balance, payments and returns-to-debt', () => {
   assert.throws(() => core.createSalesReturn(db, actor, { invoice_id: r.id, items: [{ invoice_item_id: inv.items[0].id, quantity: 4 }], refund_method: 'qarz' })); // only 3 left
 });
 
-test('returns restock the original batch and prorate the discount', () => {
+test('returns restock the original batch at full price', () => {
   const p = prod('Ret'); const b = batch(p, 'r', day(90), 10, 400, 1000);
   const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 4 }], payment_method: 'cash', discount_amount: 400 });
   assert.equal(qty(b), 6);
   const inv = core.getInvoice(db, r.id);
   const ret = core.createSalesReturn(db, actor, { invoice_id: r.id, items: [{ invoice_item_id: inv.items[0].id, quantity: 4 }], refund_method: 'cash' });
-  assert.equal(ret.total, 3600); // never refund more than paid
+  assert.equal(ret.total, 4000);
   assert.equal(qty(b), 10);
+});
+
+test('returns are blocked once 2 days have passed since the sale', () => {
+  const p = prod('Late'); const b = batch(p, 'lt', day(90), 10, 400, 1000);
+  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 2 }], payment_method: 'cash' });
+  const inv = core.getInvoice(db, r.id);
+  const H = 60 * 60 * 1000;
+  db.prepare('UPDATE invoices SET created_at = ? WHERE id = ?').run(new Date(Date.now() - 47 * H).toISOString(), r.id);
+  core.createSalesReturn(db, actor, { invoice_id: r.id, items: [{ invoice_item_id: inv.items[0].id, quantity: 1 }], refund_method: 'cash' });
+  db.prepare('UPDATE invoices SET created_at = ? WHERE id = ?').run(new Date(Date.now() - 49 * H).toISOString(), r.id);
+  throwsCode(() => core.createSalesReturn(db, actor, { invoice_id: r.id, items: [{ invoice_item_id: inv.items[0].id, quantity: 1 }], refund_method: 'cash' }), 'RETURN_EXPIRED');
+  assert.equal(qty(b), 9);
 });
 
 test('purchase approval creates batches; credit raises supplier balance; RTV lowers it', () => {

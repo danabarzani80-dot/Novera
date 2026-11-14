@@ -20,6 +20,8 @@ export default function SalesReturns() {
   const open = async (id: number) => { setInv(await api.get(`/invoices/${id}`)); setQty({}); setMethod('cash'); };
   useEffect(() => { if (inv?.customer_id && inv.payment_method === 'qarz') setMethod('qarz'); }, [inv]);
 
+  // Returns are allowed only within 2 days (48 hours) of the sale; the server enforces the same rule.
+  const expired = inv ? Date.now() - Date.parse(inv.created_at) > 2 * 24 * 60 * 60 * 1000 : false;
   const refund = inv ? inv.items.reduce((s: number, i: any) => s + (qty[i.id] || 0) * i.unit_price, 0) * (inv.subtotal ? inv.grand_total / inv.subtotal : 1) : 0;
   const submit = async () => {
     const items = Object.entries(qty).filter(([, q]) => q > 0).map(([id, q]) => ({ invoice_item_id: Number(id), quantity: q }));
@@ -55,12 +57,13 @@ export default function SalesReturns() {
             {!inv ? <Empty icon={<Undo2 size={36} />} text={t('select_invoice_left')} /> : (
               <>
                 <div className="flex justify-between mb-3"><h3 className="font-extrabold">{inv.invoice_number}</h3><span className="text-sm text-slate-500">{fmtDateTime(inv.created_at)}</span></div>
+                {expired && <div className="mb-3 rounded-xl bg-rose-50 border border-rose-200 p-3 text-sm font-bold text-rose-700">{t('return_expired')}</div>}
                 <table className="w-full"><thead><tr><th className="th">{t('medicine')}</th><th className="th">{t('batch')}</th><th className="th">{t('price')}</th><th className="th">{t('sold')}</th><th className="th">{t('returned')}</th><th className="th w-28">{t('return_qty')}</th></tr></thead>
                   <tbody>{inv.items.map((i: any) => {
                     const left = i.quantity - i.returned_qty;
                     return (<tr key={i.id}><td className="td font-bold">{i.brand_name} {i.dosage}</td><td className="td">{i.batch_number}</td><td className="td">{iqd(i.unit_price)}</td>
                       <td className="td">{i.quantity}</td><td className="td">{i.returned_qty}</td>
-                      <td className="td"><input type="number" min={0} max={left} disabled={left === 0} className="input !py-1" value={qty[i.id] ?? ''}
+                      <td className="td"><input type="number" min={0} max={left} disabled={left === 0 || expired} className="input !py-1" value={qty[i.id] ?? ''}
                         onChange={(e) => setQty({ ...qty, [i.id]: Math.max(0, Math.min(left, Number(e.target.value) || 0)) })} /></td></tr>);
                   })}</tbody></table>
                 <div className="mt-4 flex flex-wrap items-end justify-between gap-3">
@@ -72,7 +75,7 @@ export default function SalesReturns() {
                   </div>
                   <div className="text-end"><div className="card-title">{t('refund_total')}</div><div className="text-2xl font-extrabold text-blue-600">{iqd(refund)}</div></div>
                 </div>
-                <button className="btn-primary mt-4" disabled={busy || refund <= 0} onClick={submit}><Undo2 size={16} />{t('process_return')}</button>
+                <button className="btn-primary mt-4" disabled={busy || expired || refund <= 0} onClick={submit}><Undo2 size={16} />{t('process_return')}</button>
               </>
             )}
           </div>

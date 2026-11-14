@@ -159,8 +159,8 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
     }
 
     const subtotal = lines.reduce((s, l) => s + l.total, 0);
-    const pct = Math.min(100, Math.max(0, Number(input.discount_pct) || 0));
-    const discount = Math.min(subtotal, Math.round((subtotal * pct) / 100) + Math.max(0, int(input.discount_amount)));
+    // Discounts are disabled: every sale is charged at full price (discount_pct / discount_amount are ignored).
+    const discount = 0;
     const extra = Math.max(0, int(input.extra_amount));
     const grand = subtotal - discount + extra;
 
@@ -222,10 +222,18 @@ export function getInvoice(db: DB, id: number) {
 }
 
 // ───────────────────────── Sales returns ─────────────────────────
+// Sold items may be returned only within this many days (48 hours) of the sale.
+export const RETURN_WINDOW_DAYS = 2;
+export const isReturnable = (soldAtIso: string, now = Date.now()) =>
+  now - Date.parse(soldAtIso) <= RETURN_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+
 export function createSalesReturn(db: DB, actor: Actor, input: { invoice_id: number; items: { invoice_item_id: number; quantity: number }[]; refund_method: 'cash' | 'card' | 'qarz' }) {
   return db.transaction(() => {
     const inv = db.prepare('SELECT * FROM invoices WHERE id = ?').get(input.invoice_id) as any;
     if (!inv) throw new BizError('Invoice not found.', 'NOT_FOUND', 404);
+    if (!isReturnable(inv.created_at)) {
+      throw new BizError(`Return blocked: items can only be returned within ${RETURN_WINDOW_DAYS} days of the sale.`, 'RETURN_EXPIRED');
+    }
     const shift = activeShift(db, actor.id);
     if (!shift) throw new BizError('Open a shift before processing a return.', 'NO_SHIFT');
     if (input.refund_method === 'qarz' && !inv.customer_id) throw new BizError('This invoice has no customer, so debt cannot be reduced.');

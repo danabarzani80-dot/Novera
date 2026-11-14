@@ -206,6 +206,7 @@ export const dictionary: Record<string, T> = {
   refund_method: ['Refund method', 'شێوازی گەڕاندنەوەی پارە', 'طريقة الاسترداد'],
   refund_reduce_qarz: ['Reduce Qarz', 'کەمکردنەوەی قەرز', 'خصم من الدين'],
   refund_total: ['Refund total', 'کۆی گەڕێنراوە', 'إجمالي الاسترداد'],
+  return_expired: ['This sale is more than 2 days old. Items can only be returned within 2 days of purchase.', 'ئەم فرۆشتنە زیاتر لە ٢ ڕۆژ تێپەڕیوە. کاڵا تەنها لە ماوەی ٢ ڕۆژ لە کڕینەوە دەگەڕێنرێتەوە.', 'مضى على هذا البيع أكثر من يومين. لا يمكن إرجاع المواد إلا خلال يومين من الشراء.'],
   return_saved: ['Return processed and stock restored', 'گەڕاندنەوە ئەنجامدرا و کۆگا نوێکرایەوە', 'تمت معالجة المرتجع وإعادة المخزون'],
   no_returns: ['No returns yet', 'هیچ گەڕاندنەوەیەک نییە', 'لا توجد مرتجعات'],
 
