@@ -437,6 +437,7 @@ export const dictionary: Record<string, T> = {
   exp_other: ['Other', 'هی تر', 'أخرى'],
 
   // ── Admin ──
+  switch_branch: ['Switch branch', 'گۆڕینی لق', 'تبديل الفرع'],
   add_branch: ['Add branch', 'زیادکردنی لق', 'إضافة فرع'],
   add_user: ['Add user', 'زیادکردنی بەکارهێنەر', 'إضافة مستخدم'],
   save_user: ['Save user', 'پاشەکەوتکردنی بەکارهێنەر', 'حفظ المستخدم'],

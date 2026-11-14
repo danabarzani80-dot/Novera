@@ -54,7 +54,8 @@ test('nobody can sell above the price: extra cash is given back as change', () =
 
 test('sell by pack or by sheet: opens a pack, tracks loose sheets, no overselling', () => {
   const p = prod('Strip');
-  db.prepare('UPDATE products SET sheets_per_pack = 2, sheet_price = 3500 WHERE id = ?').run(p);
+  db.prepare('UPDATE products SET sheets_per_pack = 2 WHERE id = ?').run(p);
+  db.prepare('INSERT INTO product_branch (product_id, branch_id, sheet_price) VALUES (?, 1, 3500)').run(p);
   const b = batch(p, 'S1', day(200), 3, 4000, 6000); // 3 packs = 6 sheets, pack cost 4000, pack price 6000
   const loose = () => (db.prepare('SELECT loose_units l FROM batches WHERE id=?').get(b) as any).l;
   // 1 sheet: opens a pack -> 2 packs + 1 loose sheet
@@ -150,7 +151,7 @@ test('mixed payment and validation (no discount applied)', () => {
 test('qarz needs a customer; balance, payments and returns-to-debt', () => {
   const p = prod('Qarz'); batch(p, 'q', day(90), 20, 100, 1000);
   throwsCode(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'qarz' }), 'BUSINESS_RULE');
-  const cid = Number(db.prepare("INSERT INTO customers (name) VALUES ('Ali')").run().lastInsertRowid);
+  const cid = Number(db.prepare("INSERT INTO customers (name, branch_id) VALUES ('Ali', 1)").run().lastInsertRowid);
   const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 5 }], payment_method: 'qarz', customer_id: cid, cash_received: 1000 });
   assert.equal(core.customerBalance(db, cid), 4000);
   core.recordCustomerPayment(db, actor, { customer_id: cid, amount: 1500 });
@@ -224,7 +225,7 @@ test('returns are blocked once 2 days have passed since the sale', () => {
 });
 
 test('purchase approval creates batches; credit raises supplier balance; RTV lowers it', () => {
-  const sid = Number(db.prepare("INSERT INTO suppliers (name) VALUES ('BioTech')").run().lastInsertRowid);
+  const sid = Number(db.prepare("INSERT INTO suppliers (name, branch_id) VALUES ('BioTech', 1)").run().lastInsertRowid);
   const p = prod('Buy');
   const item = { product_id: p, batch_number: 'B1', expiry_date: day(365), quantity: 10, cost_price: 500, margin_pct: 20, selling_price: 600 };
   const draft = core.savePurchase(db, actor, { supplier_id: sid, payment_type: 'credit', items: [item], approve: false });
@@ -248,7 +249,10 @@ test('transfers move stock only when received', () => {
   assert.equal(qty(b), 10);
   assert.throws(() => core.transitionTransfer(db, actor, t.id, 'receive')); // must be approved first
   core.transitionTransfer(db, actor, t.id, 'approve'); assert.equal(qty(b), 10);
-  core.transitionTransfer(db, actor, t.id, 'receive');
+  const b2 = { ...actor, branch_id: 2 };
+  throwsCode(() => core.transitionTransfer(db, actor, t.id, 'receive'), 'FORBIDDEN'); // only the receiving branch confirms
+  throwsCode(() => core.createTransfer(db, b2, { from_branch: 1, to_branch: 2, items: [{ batch_id: b, quantity: 1 }] }), 'FORBIDDEN'); // can't pull another branch's stock
+  core.transitionTransfer(db, b2, t.id, 'receive');
   assert.equal(qty(b), 6);
   assert.equal((db.prepare('SELECT quantity q FROM batches WHERE product_id=? AND branch_id=2').get(p) as any).q, 4);
 });
@@ -268,6 +272,59 @@ test('P&L math: revenue, COGS, returns, shrinkage and expenses', () => {
   const pl = core.profitAndLoss(fresh, day(0), day(0));
   assert.equal(pl.net_revenue, 8000); assert.equal(pl.cogs, 4800); assert.equal(pl.gross_profit, 3200);
   assert.equal(pl.shrinkage, 3000); assert.equal(pl.expenses, 1000); assert.equal(pl.net_profit, -800);
+});
+
+test('branches are separate pharmacies: prices, suppliers, customers, P&L', () => {
+  const f = openDatabase(':memory:');
+  f.prepare("INSERT INTO branches (name) VALUES ('Link Pharmacy')").run(); // branch 2
+  const mk = (br: number) => ({ id: Number(f.prepare("INSERT INTO users (name,username,password_hash,role,branch_id) VALUES ('U',?,'x','pharmacist',?)").run('u' + br, br).lastInsertRowid), role: 'pharmacist', branch_id: br });
+  const nov = mk(1), link = mk(2);
+  core.openShift(f, nov, 0); core.openShift(f, link, 0);
+  // Same medicine in the shared catalogue, different prices per branch (pack price on the batch, sheet price per branch).
+  const p = Number(f.prepare("INSERT INTO products (brand_name, sheets_per_pack) VALUES ('Amox', 2)").run().lastInsertRowid);
+  f.prepare('INSERT INTO product_branch (product_id, branch_id, sheet_price) VALUES (?,1,3000),(?,2,3500)').run(p, p);
+  const bN = Number(f.prepare("INSERT INTO batches (product_id,branch_id,batch_number,expiry_date,quantity,purchase_price,selling_price) VALUES (?,1,'n',?,10,1000,5000)").run(p, day(200)).lastInsertRowid);
+  const bL = Number(f.prepare("INSERT INTO batches (product_id,branch_id,batch_number,expiry_date,quantity,purchase_price,selling_price) VALUES (?,2,'l',?,10,1000,6000)").run(p, day(200)).lastInsertRowid);
+  const sN = core.checkout(f, nov, { items: [{ product_id: p, quantity: 1 }, { product_id: p, quantity: 1, unit: 'sheet' }], payment_method: 'cash' });
+  const sL = core.checkout(f, link, { items: [{ product_id: p, quantity: 1 }, { product_id: p, quantity: 1, unit: 'sheet' }], payment_method: 'cash' });
+  assert.equal(core.getInvoice(f, sN.id).grand_total, 5000 + 3000);
+  assert.equal(core.getInvoice(f, sL.id).grand_total, 6000 + 3500);
+  // Each branch sells only its own stock.
+  assert.equal((f.prepare('SELECT quantity q FROM batches WHERE id=?').get(bL) as any).q, 8);
+  assert.equal((f.prepare('SELECT quantity q FROM batches WHERE id=?').get(bN) as any).q, 8);
+  // Suppliers and customers belong to one branch.
+  const supN = Number(f.prepare("INSERT INTO suppliers (name, branch_id) VALUES ('Nov supplier', 1)").run().lastInsertRowid);
+  const item = { product_id: p, batch_number: 'X', expiry_date: day(300), quantity: 1, cost_price: 100, selling_price: 200 };
+  throwsCode(() => core.savePurchase(f, link, { supplier_id: supN, payment_type: 'credit', items: [item], approve: true }), 'NOT_FOUND');
+  throwsCode(() => core.createRtv(f, link, { supplier_id: supN, items: [{ batch_id: bL, quantity: 1 }] }), 'NOT_FOUND');
+  throwsCode(() => core.createRtv(f, nov, { supplier_id: supN, items: [{ batch_id: bL, quantity: 1 }] }), 'NOT_FOUND'); // Link's batch
+  const cusN = Number(f.prepare("INSERT INTO customers (name, branch_id) VALUES ('Ali', 1)").run().lastInsertRowid);
+  throwsCode(() => core.checkout(f, link, { items: [{ product_id: p, quantity: 1 }], payment_method: 'qarz', customer_id: cusN }), 'NOT_FOUND');
+  throwsCode(() => core.recordCustomerPayment(f, link, { customer_id: cusN, amount: 250 }), 'NOT_FOUND');
+  // Returns and stock counts only on your own branch.
+  const invN = core.getInvoice(f, sN.id);
+  throwsCode(() => core.createSalesReturn(f, link, { invoice_id: sN.id, items: [{ invoice_item_id: invN.items[0].id, quantity: 1 }], refund_method: 'cash' }), 'NOT_FOUND');
+  assert.throws(() => core.adjustStock(f, link, { batch_id: bN, counted_qty: 0, reason: 'damaged' }));
+  // P&L and expenses per branch.
+  f.prepare("INSERT INTO expenses (category,amount,date,branch_id) VALUES ('rent',1000,?,2)").run(day(0));
+  const plN = core.profitAndLoss(f, day(0), day(0), 1), plL = core.profitAndLoss(f, day(0), day(0), 2);
+  assert.equal(plN.net_revenue, 8000); assert.equal(plN.expenses, 0);
+  assert.equal(plL.net_revenue, 9500); assert.equal(plL.expenses, 1000);
+  assert.equal(core.profitAndLoss(f, day(0), day(0)).net_revenue, 17500); // no branch = both
+});
+
+test('upgrade: existing data is kept for the first branch (Novera)', () => {
+  const file = `/tmp/pharm-migr-${Date.now()}.db`;
+  const old = openDatabase(file);
+  // Simulate pre-change rows (written without branch_id) by clearing the columns, then re-run migrations on a reopen.
+  old.prepare("INSERT INTO products (brand_name, sheet_price, reorder_level, supplier_id) VALUES ('Old', 1250, 7, NULL)").run();
+  old.prepare("DELETE FROM product_branch").run();
+  old.prepare("DELETE FROM settings WHERE key='migr_product_branch'").run();
+  old.close();
+  const again = openDatabase(file);
+  const pb = again.prepare('SELECT * FROM product_branch').get() as any;
+  assert.equal(pb.branch_id, 1); assert.equal(pb.sheet_price, 1250); assert.equal(pb.reorder_level, 7);
+  again.close();
 });
 
 test('audit log is append-only', () => {

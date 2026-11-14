@@ -125,7 +125,8 @@ export function ShiftDialog({ onClose, onDone }: { onClose: () => void; onDone: 
 
 export function Header({ onMenu, badge, onShiftChanged }: { onMenu: () => void; badge?: number; onShiftChanged: () => void }) {
   const { t, lang, setLang } = useI18n();
-  const { user, shift, pharmacyName } = useAuth();
+  const { user, shift, pharmacyName, branch, branches } = useAuth();
+  const { run } = useAction();
   const [online, setOnline] = useState(navigator.onLine);
   const [showShift, setShowShift] = useState(false);
   useEffect(() => {
@@ -158,6 +159,15 @@ export function Header({ onMenu, badge, onShiftChanged }: { onMenu: () => void; 
             <Clock size={14} className="text-orange-500" />
             {shift ? t('shift_active', { n: shift.id }) : t('no_active_shift')}
           </button>
+        )}
+        {branches.length > 1 && (
+          <label className="flex items-center gap-1.5 bg-blue-50 border border-blue-200 text-blue-700 rounded-full px-2.5 py-1 text-xs font-bold" title={t('switch_branch')}>
+            <Building2 size={14} />
+            <select className="bg-transparent font-bold outline-none max-w-[9rem]" value={branch?.id ?? ''}
+              onChange={async (e) => { if (await run(() => api.put('/auth/branch', { branch_id: Number(e.target.value) }))) window.location.reload(); }}>
+              {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </select>
+          </label>
         )}
         <div className="flex items-center bg-slate-100 rounded-full p-0.5 text-xs font-bold">
           <Globe size={14} className="mx-2 text-slate-500" />

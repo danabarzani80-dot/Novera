@@ -18,7 +18,8 @@ export function openDatabase(file: string): DB {
   // Migrations (safe to run on every start): sell by pack or by sheet.
   const addCol = (table: string, col: string, def: string) => {
     const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
-    if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+    if (!cols.includes(col)) { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); return true; }
+    return false;
   };
   addCol('products', 'sheets_per_pack', 'INTEGER NOT NULL DEFAULT 1');
   addCol('products', 'sheet_price', 'INTEGER');
@@ -31,6 +32,20 @@ export function openDatabase(file: string): DB {
   addCol('invoice_items', 'pack_size', 'INTEGER NOT NULL DEFAULT 1'); // smallest units in one pack
   const hasBranch = db.prepare('SELECT COUNT(*) c FROM branches').get() as { c: number };
   if (hasBranch.c === 0) db.prepare("INSERT INTO branches (name) VALUES ('Main Branch')").run();
+  // Branch separation: each branch is run as its own pharmacy. Everything that existed before
+  // this change belongs to the first branch (the original pharmacy).
+  const first = (db.prepare('SELECT MIN(id) id FROM branches').get() as { id: number }).id;
+  db.transaction(() => {
+    for (const t of ['suppliers', 'customers', 'expenses', 'rtv']) {
+      if (addCol(t, 'branch_id', 'INTEGER')) db.prepare(`UPDATE ${t} SET branch_id = ?`).run(first);
+    }
+    const done = db.prepare("SELECT value FROM settings WHERE key = 'migr_product_branch'").get();
+    if (!done) {
+      db.prepare(`INSERT OR IGNORE INTO product_branch (product_id, branch_id, sheet_price, tablet_price, reorder_level, supplier_id)
+        SELECT id, ?, sheet_price, tablet_price, reorder_level, supplier_id FROM products`).run(first);
+      db.prepare("INSERT INTO settings (key, value) VALUES ('migr_product_branch', '1')").run();
+    }
+  })();
   return db;
 }
 

@@ -25,6 +25,13 @@ export function audit(db: DB, actor: Actor | null, module: string, action: strin
     .run(nowIso(), actor?.id ?? null, actor?.role ?? null, module, action, JSON.stringify(details));
 }
 
+/** Each branch is a separate pharmacy: a row that belongs to another branch is treated as not found. */
+export function assertBranch(db: DB, table: 'suppliers' | 'customers' | 'batches' | 'invoices' | 'purchase_invoices' | 'shifts' | 'rtv' | 'expenses',
+  id: unknown, branchId: number, what: string) {
+  const row = db.prepare(`SELECT branch_id FROM ${table} WHERE id = ?`).get(id) as { branch_id: number } | undefined;
+  if (!row || row.branch_id !== branchId) throw new BizError(`${what} not found.`, 'NOT_FOUND', 404);
+}
+
 export function activeShift(db: DB, userId: number): { id: number; opened_at: string; opening_cash: number } | undefined {
   return db.prepare('SELECT id, opened_at, opening_cash FROM shifts WHERE user_id = ? AND closed_at IS NULL ORDER BY id DESC LIMIT 1')
     .get(userId) as any;
@@ -94,6 +101,7 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
     const shift = activeShift(db, actor.id);
     if (!shift) throw new BizError('Open a shift before selling.', 'NO_SHIFT');
     if (!input.items?.length) throw new BizError('The receipt is empty.');
+    if (input.customer_id) assertBranch(db, 'customers', input.customer_id, actor.branch_id, 'Customer');
     const today = todayStr();
 
     type Unit = 'pack' | 'sheet' | 'tablet';
@@ -121,7 +129,8 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
     const st = (b: any) => { let x = state.get(b.id); if (!x) { x = { packs: b.quantity, loose: b.loose_units ?? 0 }; state.set(b.id, x); } return x; };
 
     for (const w of wanted.values()) {
-      const product = db.prepare('SELECT id, brand_name, sheets_per_pack, sheet_price, tablets_per_sheet, tablet_price FROM products WHERE id = ? AND active = 1').get(w.product_id) as any;
+      const product = db.prepare(`SELECT p.id, p.brand_name, p.sheets_per_pack, p.tablets_per_sheet, pb.sheet_price, pb.tablet_price FROM products p
+        LEFT JOIN product_branch pb ON pb.product_id = p.id AND pb.branch_id = ? WHERE p.id = ? AND p.active = 1`).get(actor.branch_id, w.product_id) as any;
       if (!product) throw new BizError('Medicine not found.', 'NOT_FOUND', 404);
       const spp = Math.max(1, int(product.sheets_per_pack) || 1);
       const tps = Math.max(1, int(product.tablets_per_sheet) || 1);
@@ -273,7 +282,7 @@ export const isReturnable = (soldAtIso: string, now = Date.now()) =>
 export function createSalesReturn(db: DB, actor: Actor, input: { invoice_id: number; items: { invoice_item_id: number; quantity: number }[]; refund_method: 'cash' | 'card' | 'qarz' }) {
   return db.transaction(() => {
     const inv = db.prepare('SELECT * FROM invoices WHERE id = ?').get(input.invoice_id) as any;
-    if (!inv) throw new BizError('Invoice not found.', 'NOT_FOUND', 404);
+    if (!inv || inv.branch_id !== actor.branch_id) throw new BizError('Invoice not found.', 'NOT_FOUND', 404);
     if (!isReturnable(inv.created_at)) {
       throw new BizError(`Return blocked: items can only be returned within ${RETURN_WINDOW_DAYS} days of the sale.`, 'RETURN_EXPIRED');
     }
@@ -342,10 +351,11 @@ function savePurchaseItems(db: DB, id: number, items: PurchaseItemInput[]) {
 
 export function savePurchase(db: DB, actor: Actor, input: { id?: number; supplier_id: number; invoice_number?: string; payment_type: 'cash' | 'credit'; items: PurchaseItemInput[]; approve: boolean }) {
   return db.transaction(() => {
+    assertBranch(db, 'suppliers', input.supplier_id, actor.branch_id, 'Supplier');
     let id = input.id;
     if (id) {
-      const ex = db.prepare('SELECT status FROM purchase_invoices WHERE id = ?').get(id) as any;
-      if (!ex) throw new BizError('Purchase invoice not found.', 'NOT_FOUND', 404);
+      const ex = db.prepare('SELECT status, branch_id FROM purchase_invoices WHERE id = ?').get(id) as any;
+      if (!ex || ex.branch_id !== actor.branch_id) throw new BizError('Purchase invoice not found.', 'NOT_FOUND', 404);
       if (ex.status === 'approved') throw new BizError('An approved invoice cannot be edited.');
       db.prepare('UPDATE purchase_invoices SET supplier_id=?, invoice_number=?, payment_type=? WHERE id=?')
         .run(input.supplier_id, input.invoice_number || null, input.payment_type, id);
@@ -380,10 +390,11 @@ export function savePurchase(db: DB, actor: Actor, input: { id?: number; supplie
 export function createRtv(db: DB, actor: Actor, input: { supplier_id: number; reason?: string; items: { batch_id: number; quantity: number }[] }) {
   return db.transaction(() => {
     if (!input.items?.length) throw new BizError('Add at least one batch to return.');
+    assertBranch(db, 'suppliers', input.supplier_id, actor.branch_id, 'Supplier');
     let total = 0;
     const rows: any[] = [];
     for (const it of input.items) {
-      const b = db.prepare('SELECT * FROM batches WHERE id = ?').get(it.batch_id) as any;
+      const b = db.prepare('SELECT * FROM batches WHERE id = ? AND branch_id = ?').get(it.batch_id, actor.branch_id) as any;
       if (!b) throw new BizError('Batch not found.', 'NOT_FOUND', 404);
       const q = int(it.quantity);
       if (q <= 0) throw new BizError('Quantity must be greater than zero.');
@@ -391,8 +402,8 @@ export function createRtv(db: DB, actor: Actor, input: { supplier_id: number; re
       total += q * b.purchase_price;
       rows.push({ b, q });
     }
-    const rid = Number(db.prepare('INSERT INTO rtv (supplier_id,reason,total,user_id,created_at) VALUES (?,?,?,?,?)')
-      .run(input.supplier_id, input.reason || null, total, actor.id, nowIso()).lastInsertRowid);
+    const rid = Number(db.prepare('INSERT INTO rtv (supplier_id,reason,total,user_id,branch_id,created_at) VALUES (?,?,?,?,?,?)')
+      .run(input.supplier_id, input.reason || null, total, actor.id, actor.branch_id, nowIso()).lastInsertRowid);
     for (const { b, q } of rows) {
       db.prepare('INSERT INTO rtv_items (rtv_id,batch_id,product_id,quantity,unit_cost) VALUES (?,?,?,?,?)').run(rid, b.id, b.product_id, q, b.purchase_price);
       db.prepare('UPDATE batches SET quantity = quantity - ? WHERE id = ?').run(q, b.id);
@@ -405,7 +416,7 @@ export function createRtv(db: DB, actor: Actor, input: { supplier_id: number; re
 // ───────────────────────── Stock ─────────────────────────
 export function adjustStock(db: DB, actor: Actor, input: { batch_id: number; counted_qty: number; reason: string }) {
   return db.transaction(() => {
-    const b = db.prepare('SELECT * FROM batches WHERE id = ?').get(input.batch_id) as any;
+    const b = db.prepare('SELECT * FROM batches WHERE id = ? AND branch_id = ?').get(input.batch_id, actor.branch_id) as any;
     if (!b) throw new BizError('Batch not found.', 'NOT_FOUND', 404);
     const counted = int(input.counted_qty);
     if (counted < 0) throw new BizError('Counted quantity cannot be negative.');
@@ -421,6 +432,7 @@ export function adjustStock(db: DB, actor: Actor, input: { batch_id: number; cou
 export function createTransfer(db: DB, actor: Actor, input: { from_branch: number; to_branch: number; items: { batch_id: number; quantity: number }[] }) {
   return db.transaction(() => {
     if (input.from_branch === input.to_branch) throw new BizError('Choose two different branches.');
+    if (actor.role !== 'super_admin' && Number(input.from_branch) !== actor.branch_id) throw new BizError('You can only send stock from your own branch.', 'FORBIDDEN', 403);
     if (!input.items?.length) throw new BizError('Add at least one item.');
     const tid = Number(db.prepare('INSERT INTO stock_transfers (from_branch,to_branch,status,user_id,created_at) VALUES (?,?,?,?,?)')
       .run(input.from_branch, input.to_branch, 'pending', actor.id, nowIso()).lastInsertRowid);
@@ -439,6 +451,11 @@ export function transitionTransfer(db: DB, actor: Actor, id: number, action: 'ap
   return db.transaction(() => {
     const t = db.prepare('SELECT * FROM stock_transfers WHERE id = ?').get(id) as any;
     if (!t) throw new BizError('Transfer not found.', 'NOT_FOUND', 404);
+    if (actor.role !== 'super_admin') {
+      // Sending branch approves/rejects; only the receiving branch confirms receipt.
+      const mine = action === 'receive' ? t.to_branch : t.from_branch;
+      if (mine !== actor.branch_id && !(action === 'reject' && t.to_branch === actor.branch_id)) throw new BizError('This transfer belongs to another branch.', 'FORBIDDEN', 403);
+    }
     if (action === 'approve' || action === 'reject') {
       if (t.status !== 'pending') throw new BizError('Only pending transfers can be approved or rejected.');
       db.prepare('UPDATE stock_transfers SET status = ? WHERE id = ?').run(action === 'approve' ? 'approved' : 'rejected', id);
@@ -498,6 +515,7 @@ export function recordCustomerPayment(db: DB, actor: Actor, input: { customer_id
   return db.transaction(() => {
     const amount = int(input.amount);
     if (amount <= 0) throw new BizError('Amount must be greater than zero.');
+    assertBranch(db, 'customers', input.customer_id, actor.branch_id, 'Customer');
     const bal = customerBalance(db, input.customer_id);
     if (amount > bal) throw new BizError('Payment is more than the outstanding debt.');
     const shift = activeShift(db, actor.id);
@@ -520,20 +538,25 @@ export function expiryStatus(days: number): 'expired' | 'critical' | 'warning' |
 }
 
 // ───────────────────────── P&L ─────────────────────────
-export function profitAndLoss(db: DB, from: string, to: string) {
+export function profitAndLoss(db: DB, from: string, to: string, branchId?: number) {
   // created_at is stored in UTC ISO; compare against local-day bounds converted to UTC.
   const fromIso = new Date(from + 'T00:00:00').toISOString();
   const toIso = new Date(to + 'T23:59:59.999').toISOString();
+  // Optional branch filter: each branch is its own pharmacy with its own P&L.
+  const all = branchId === undefined;
+  const br = all ? [] : [branchId];
   const sales = db.prepare(`SELECT COALESCE(SUM(grand_total),0) revenue, COUNT(*) receipts FROM invoices
-    WHERE status='completed' AND created_at BETWEEN ? AND ?`).get(fromIso, toIso) as any;
+    WHERE status='completed' AND created_at BETWEEN ? AND ?${all ? '' : ' AND branch_id = ?'}`).get(fromIso, toIso, ...br) as any;
   const cogs = db.prepare(`SELECT COALESCE(SUM(ii.quantity * ii.purchase_price),0) c FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
-    WHERE i.status='completed' AND i.created_at BETWEEN ? AND ?`).get(fromIso, toIso) as any;
-  const ret = db.prepare('SELECT COALESCE(SUM(total),0) t FROM sales_returns WHERE created_at BETWEEN ? AND ?').get(fromIso, toIso) as any;
+    WHERE i.status='completed' AND i.created_at BETWEEN ? AND ?${all ? '' : ' AND i.branch_id = ?'}`).get(fromIso, toIso, ...br) as any;
+  const ret = db.prepare(`SELECT COALESCE(SUM(r.total),0) t FROM sales_returns r JOIN invoices i ON i.id = r.invoice_id
+    WHERE r.created_at BETWEEN ? AND ?${all ? '' : ' AND i.branch_id = ?'}`).get(fromIso, toIso, ...br) as any;
   const retCogs = db.prepare(`SELECT COALESCE(SUM(sri.quantity * sri.purchase_price),0) c FROM sales_return_items sri JOIN sales_returns r ON r.id = sri.return_id
-    WHERE r.created_at BETWEEN ? AND ?`).get(fromIso, toIso) as any;
+    JOIN invoices i ON i.id = r.invoice_id WHERE r.created_at BETWEEN ? AND ?${all ? '' : ' AND i.branch_id = ?'}`).get(fromIso, toIso, ...br) as any;
   const shrink = db.prepare(`SELECT COALESCE(SUM((a.system_qty - a.counted_qty) * b.purchase_price),0) s FROM stock_adjustments a JOIN batches b ON b.id = a.batch_id
-    WHERE a.created_at BETWEEN ? AND ?`).get(fromIso, toIso) as any;
-  const exp = db.prepare('SELECT category, COALESCE(SUM(amount),0) a FROM expenses WHERE date BETWEEN ? AND ? GROUP BY category').all(from, to) as any[];
+    WHERE a.created_at BETWEEN ? AND ?${all ? '' : ' AND b.branch_id = ?'}`).get(fromIso, toIso, ...br) as any;
+  const exp = db.prepare(`SELECT category, COALESCE(SUM(amount),0) a FROM expenses WHERE date BETWEEN ? AND ?${all ? '' : ' AND branch_id = ?'} GROUP BY category`)
+    .all(from, to, ...br) as any[];
   const expenses = exp.reduce((s, e) => s + e.a, 0);
 
   const netRevenue = sales.revenue - ret.t;

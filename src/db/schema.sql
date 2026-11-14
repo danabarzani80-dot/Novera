@@ -116,5 +116,11 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, user_id INTEGER, role TEXT, module TEXT NOT NULL,
   action_code TEXT NOT NULL, details_json TEXT
 );
+-- Per-branch product settings: each branch (pharmacy) has its own sheet/tablet prices, reorder level and usual supplier.
+CREATE TABLE IF NOT EXISTS product_branch (
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE, branch_id INTEGER NOT NULL REFERENCES branches(id),
+  sheet_price INTEGER, tablet_price INTEGER, reorder_level INTEGER, supplier_id INTEGER,
+  PRIMARY KEY (product_id, branch_id)
+);
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_logs BEGIN SELECT RAISE(ABORT, 'audit_logs is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_logs BEGIN SELECT RAISE(ABORT, 'audit_logs is append-only'); END;

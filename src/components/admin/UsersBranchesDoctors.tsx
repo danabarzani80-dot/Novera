@@ -32,7 +32,7 @@ function Branches() {
 
 function Users() {
   const { t } = useI18n();
-  const { user: me, pharmacyName, refresh } = useAuth();
+  const { user: me, settingsPharmacyName, refresh } = useAuth();
   const { toast } = useToast();
   const { run, busy } = useAction();
   const users = useLoad(() => api.get('/users'), []);
@@ -41,7 +41,7 @@ function Users() {
   const [reset, setReset] = useState<any>(null);
   const [pw, setPw] = useState('');
   const [toggle, setToggle] = useState<any>(null);
-  const [name, setName] = useState(pharmacyName);
+  const [name, setName] = useState(settingsPharmacyName);
   const [restoreFile, setRestoreFile] = useState<File | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 

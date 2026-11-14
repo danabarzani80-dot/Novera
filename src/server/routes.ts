@@ -9,7 +9,7 @@ import Database from 'better-sqlite3';
 import { DATA_DIR, DB_FILE, closeDb, getDb, openDatabase, setDb } from '../db/database';
 import { can, type Module, type Role, type SessionUser } from '../types/pharmacy';
 import * as core from './core';
-import { BizError, audit, daysLeft, expiryStatus, nowIso, todayStr } from './core';
+import { BizError, assertBranch, audit, daysLeft, expiryStatus, nowIso, todayStr } from './core';
 
 declare module 'express-serve-static-core' {
   interface Request { user?: SessionUser }
@@ -34,6 +34,18 @@ const wrap = (fn: (req: Request, res: Response) => unknown) => (req: Request, re
 
 const int = (v: unknown) => Math.round(Number(v) || 0);
 const actor = (req: Request) => ({ id: req.user!.id, role: req.user!.role, branch_id: req.user!.branch_id });
+const branchOf = (req: Request) => req.user!.branch_id;
+const isAdmin = (req: Request) => req.user!.role === 'super_admin';
+
+/** Name printed on receipts and shown in the header. With one branch it is the pharmacy name from
+ *  Settings; with several branches (each run as its own pharmacy) it is that branch's name. */
+function displayName(branchId: number): string {
+  const db = getDb();
+  const global = (db.prepare("SELECT value FROM settings WHERE key='pharmacy_name'").get() as any)?.value ?? '';
+  const n = (db.prepare('SELECT COUNT(*) c FROM branches').get() as any).c;
+  if (n <= 1) return global;
+  return (db.prepare('SELECT name FROM branches WHERE id = ?').get(branchId) as any)?.name ?? global;
+}
 
 function needAuth(req: Request, _res: Response, next: NextFunction) {
   try {
@@ -102,7 +114,19 @@ export function createRouter() {
   r.get('/auth/me', wrap((req) => {
     const name = (db().prepare("SELECT value FROM settings WHERE key='pharmacy_name'").get() as any)?.value ?? '';
     const shift = core.activeShift(db(), req.user!.id) ?? null;
-    return { user: req.user, pharmacyName: name, shift };
+    const branch = db().prepare('SELECT id, name FROM branches WHERE id = ?').get(branchOf(req)) as any;
+    const branches = isAdmin(req) ? db().prepare('SELECT id, name FROM branches ORDER BY id').all() : [];
+    return { user: req.user, pharmacyName: displayName(branchOf(req)), settingsPharmacyName: name, branch, branches, shift };
+  }));
+  // The admin works in one branch at a time and can switch between them (not while a shift is open).
+  r.put('/auth/branch', wrap((req) => {
+    if (!isAdmin(req)) throw new BizError('Only the admin can switch branches.', 'FORBIDDEN', 403);
+    const id = int(req.body?.branch_id);
+    if (!db().prepare('SELECT 1 FROM branches WHERE id = ?').get(id)) throw new BizError('Branch not found.', 'NOT_FOUND', 404);
+    if (core.activeShift(db(), req.user!.id)) throw new BizError('Close your shift before switching branch.');
+    db().prepare('UPDATE users SET branch_id = ? WHERE id = ?').run(id, req.user!.id);
+    audit(db(), actor(req), 'branches', 'BRANCH_SWITCH', { from: branchOf(req), to: id });
+    return { ok: true };
   }));
   r.put('/auth/lang', wrap((req) => {
     const lang = ['en', 'ku', 'ar'].includes(req.body?.lang) ? req.body.lang : 'en';
@@ -141,9 +165,9 @@ export function createRouter() {
   r.get('/dashboard', need('dashboard'), wrap((req) => {
     const branch = req.user!.branch_id;
     const today = todayStr();
-    const p = core.profitAndLoss(db(), today, today);
+    const p = core.profitAndLoss(db(), today, today, branch);
     const c = expiryCounts(branch);
-    const customers = db().prepare('SELECT id FROM customers').all() as { id: number }[];
+    const customers = db().prepare('SELECT id FROM customers WHERE branch_id = ?').all(branch) as { id: number }[];
     let qarz = 0, overdue = 0;
     for (const cu of customers) {
       const b = core.customerBalance(db(), cu.id);
@@ -157,12 +181,12 @@ export function createRouter() {
     const products = (db().prepare('SELECT COUNT(*) c FROM products WHERE active=1').get() as any).c;
     const recent = db().prepare(`SELECT i.id, i.invoice_number, i.created_at, i.grand_total, i.payment_method, u.name cashier
       FROM invoices i JOIN users u ON u.id = i.user_id WHERE i.branch_id = ? ORDER BY i.id DESC LIMIT 8`).all(branch);
-    const low = db().prepare(`SELECT p.brand_name, p.reorder_level, COALESCE(SUM(CASE WHEN b.expiry_date >= ? THEN b.quantity END),0) stock
-      FROM products p LEFT JOIN batches b ON b.product_id = p.id AND b.branch_id = ? WHERE p.active=1
-      GROUP BY p.id HAVING stock <= p.reorder_level ORDER BY stock ASC LIMIT 5`).all(today, branch) as any[];
-    const lowCount = (db().prepare(`SELECT COUNT(*) c FROM (SELECT p.id, COALESCE(SUM(CASE WHEN b.expiry_date >= ? THEN b.quantity END),0) stock, p.reorder_level rl
-      FROM products p LEFT JOIN batches b ON b.product_id = p.id AND b.branch_id = ? WHERE p.active=1 GROUP BY p.id) WHERE stock <= rl`).get(today, branch) as any).c;
-    const suppliers = db().prepare('SELECT id, name FROM suppliers').all() as any[];
+    const low = db().prepare(`SELECT p.brand_name, COALESCE(pb.reorder_level, p.reorder_level) reorder_level, COALESCE(SUM(CASE WHEN b.expiry_date >= ? THEN b.quantity END),0) stock
+      FROM products p LEFT JOIN batches b ON b.product_id = p.id AND b.branch_id = ? LEFT JOIN product_branch pb ON pb.product_id = p.id AND pb.branch_id = ? WHERE p.active=1
+      GROUP BY p.id HAVING stock <= reorder_level ORDER BY stock ASC LIMIT 5`).all(today, branch, branch) as any[];
+    const lowCount = (db().prepare(`SELECT COUNT(*) c FROM (SELECT p.id, COALESCE(SUM(CASE WHEN b.expiry_date >= ? THEN b.quantity END),0) stock, COALESCE(pb.reorder_level, p.reorder_level) rl
+      FROM products p LEFT JOIN batches b ON b.product_id = p.id AND b.branch_id = ? LEFT JOIN product_branch pb ON pb.product_id = p.id AND pb.branch_id = ? WHERE p.active=1 GROUP BY p.id) WHERE stock <= rl`).get(today, branch, branch) as any).c;
+    const suppliers = db().prepare('SELECT id, name FROM suppliers WHERE branch_id = ?').all(branch) as any[];
     const dueSuppliers = suppliers.map((s) => ({ name: s.name, balance: core.supplierBalance(db(), s.id) })).filter((s) => s.balance > 0);
     return {
       revenue: p.net_revenue, receipts: p.receipts, net_profit: p.net_profit,
@@ -174,9 +198,11 @@ export function createRouter() {
 
   // ─────────── Products / batches ───────────
   const productSelect = `
-    SELECT p.*, COALESCE(s.stock,0) stock, COALESCE(s.total_stock,0) total_stock, COALESCE(s.loose,0) loose,
+    SELECT p.*, pb.sheet_price, pb.tablet_price, COALESCE(pb.reorder_level, p.reorder_level) reorder_level, pb.supplier_id,
+      COALESCE(s.stock,0) stock, COALESCE(s.total_stock,0) total_stock, COALESCE(s.loose,0) loose,
       s.nearest_expiry, f.selling_price price, f.purchase_price cost
     FROM products p
+    LEFT JOIN product_branch pb ON pb.product_id = p.id AND pb.branch_id = @branch
     LEFT JOIN (SELECT product_id,
         SUM(CASE WHEN expiry_date >= @today THEN quantity ELSE 0 END) stock, SUM(quantity) total_stock,
         SUM(CASE WHEN expiry_date >= @today THEN loose_units ELSE 0 END) loose,
@@ -192,7 +218,7 @@ export function createRouter() {
     const size = Math.min(1000, Math.max(1, int(req.query.size) || 25));
     const lowOnly = req.query.low === '1';
     const where = `WHERE p.active = 1 AND (p.brand_name LIKE @q OR p.generic_name LIKE @q OR p.barcode LIKE @q)` +
-      (cat ? ' AND p.category = @cat' : '') + (lowOnly ? ' AND COALESCE(s.stock,0) <= p.reorder_level' : '');
+      (cat ? ' AND p.category = @cat' : '') + (lowOnly ? ' AND COALESCE(s.stock,0) <= COALESCE(pb.reorder_level, p.reorder_level)' : '');
     const params = { today: todayStr(), branch: req.user!.branch_id, q, cat };
     const total = (db().prepare(`SELECT COUNT(*) c FROM (${productSelect} ${where})`).get(params) as any).c;
     const rows = db().prepare(`${productSelect} ${where} ORDER BY p.brand_name LIMIT ${size} OFFSET ${(page - 1) * size}`).all(params);
@@ -228,6 +254,13 @@ export function createRouter() {
     tablets_per_sheet: Math.max(1, int(b.tablets_per_sheet) || 1),
     tablet_price: b.tablet_price !== undefined && b.tablet_price !== null && String(b.tablet_price) !== '' && int(b.tablet_price) > 0 ? int(b.tablet_price) : null,
   });
+  // Sheet/tablet prices, reorder level and usual supplier belong to the branch, not the shared catalogue.
+  const saveBranchFields = (productId: number, branchId: number, f: ReturnType<typeof productFields>) => {
+    if (f.supplier_id) assertBranch(db(), 'suppliers', f.supplier_id, branchId, 'Supplier');
+    db().prepare(`INSERT INTO product_branch (product_id,branch_id,sheet_price,tablet_price,reorder_level,supplier_id) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(product_id,branch_id) DO UPDATE SET sheet_price=excluded.sheet_price, tablet_price=excluded.tablet_price,
+      reorder_level=excluded.reorder_level, supplier_id=excluded.supplier_id`).run(productId, branchId, f.sheet_price, f.tablet_price, f.reorder_level, f.supplier_id);
+  };
   const dupBarcode = (e: any) => { if (String(e?.code).startsWith('SQLITE_CONSTRAINT')) throw new BizError('This barcode is already used by another medicine.'); throw e; };
 
   r.post('/products', need('products'), wrap((req) => {
@@ -237,7 +270,8 @@ export function createRouter() {
     try {
       const id = Number(db().prepare(`INSERT INTO products (barcode,brand_name,generic_name,category,manufacturer,dosage,form,unit,shelf_rack,is_rx,reorder_level,supplier_id,sheets_per_pack,sheet_price,tablets_per_sheet,tablet_price)
         VALUES (@barcode,@brand_name,@generic_name,@category,@manufacturer,@dosage,@form,@unit,@shelf_rack,@is_rx,@reorder_level,@supplier_id,@sheets_per_pack,@sheet_price,@tablets_per_sheet,@tablet_price)`).run(f).lastInsertRowid);
-      audit(db(), actor(req), 'products', 'PRODUCT_CREATE', { id, ...f });
+      saveBranchFields(id, branchOf(req), f);
+      audit(db(), actor(req), 'products', 'PRODUCT_CREATE', { id, branch: branchOf(req), ...f });
       return { id };
     } catch (e) { return dupBarcode(e); }
   }));
@@ -245,19 +279,30 @@ export function createRouter() {
     const f = productFields(req.body);
     if (!f.brand_name) throw new BizError('Brand name is required.');
     if (!f.barcode) f.barcode = ean13();
-    const before = db().prepare('SELECT * FROM products WHERE id = ?').get(req.params.id) as any;
+    const before = db().prepare(`SELECT p.*, pb.sheet_price, pb.tablet_price, COALESCE(pb.reorder_level, p.reorder_level) reorder_level, pb.supplier_id
+      FROM products p LEFT JOIN product_branch pb ON pb.product_id = p.id AND pb.branch_id = ? WHERE p.id = ?`).get(branchOf(req), req.params.id) as any;
+    if (!before) throw new BizError('Medicine not found.', 'NOT_FOUND', 404);
     if (before && (int(before.sheets_per_pack) !== f.sheets_per_pack || int(before.tablets_per_sheet ?? 1) !== f.tablets_per_sheet)) {
       const open = db().prepare('SELECT COALESCE(SUM(loose_units),0) n FROM batches WHERE product_id = ?').get(req.params.id) as any;
       if (open.n > 0) throw new BizError('This medicine has an opened pack (loose sheets/tablets). Sell them before changing sheets per pack or tablets per sheet.');
     }
     try {
-      db().prepare(`UPDATE products SET barcode=@barcode,brand_name=@brand_name,generic_name=@generic_name,category=@category,manufacturer=@manufacturer,
-        dosage=@dosage,form=@form,unit=@unit,shelf_rack=@shelf_rack,is_rx=@is_rx,reorder_level=@reorder_level,supplier_id=@supplier_id,sheets_per_pack=@sheets_per_pack,sheet_price=@sheet_price,tablets_per_sheet=@tablets_per_sheet,tablet_price=@tablet_price WHERE id=@id`).run({ ...f, id: req.params.id });
+      db().transaction(() => {
+        // Shared catalogue fields; prices/reorder/supplier are saved for this branch only.
+        db().prepare(`UPDATE products SET barcode=@barcode,brand_name=@brand_name,generic_name=@generic_name,category=@category,manufacturer=@manufacturer,
+          dosage=@dosage,form=@form,unit=@unit,shelf_rack=@shelf_rack,is_rx=@is_rx,sheets_per_pack=@sheets_per_pack,tablets_per_sheet=@tablets_per_sheet WHERE id=@id`).run({ ...f, id: req.params.id });
+        saveBranchFields(int(req.params.id), branchOf(req), f);
+      })();
     } catch (e) { return dupBarcode(e); }
-    audit(db(), actor(req), 'products', 'PRODUCT_UPDATE', { before, after: f });
+    audit(db(), actor(req), 'products', 'PRODUCT_UPDATE', { branch: branchOf(req), before, after: f });
     return { ok: true };
   }));
   r.delete('/products/:id', need('products'), wrap((req) => {
+    // The catalogue is shared, so a branch can't remove a medicine another branch stocks or has sold.
+    const other = db().prepare(`SELECT 1 FROM batches WHERE product_id = ? AND branch_id <> ? UNION ALL
+      SELECT 1 FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id WHERE ii.product_id = ? AND i.branch_id <> ? LIMIT 1`)
+      .get(req.params.id, branchOf(req), req.params.id, branchOf(req));
+    if (other) throw new BizError('This medicine is used by another branch, so it cannot be deleted from here.');
     const used = db().prepare('SELECT 1 FROM invoice_items WHERE product_id = ? LIMIT 1').get(req.params.id);
     if (used) db().prepare('UPDATE products SET active = 0 WHERE id = ?').run(req.params.id);
     else db().prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
@@ -268,7 +313,7 @@ export function createRouter() {
   r.get('/products/:id/batches', need('pos', 'products', 'adjust', 'expiry', 'receive', 'rtv', 'transfers', 'supplier'), wrap((req) => (db().prepare('SELECT * FROM batches WHERE product_id = ? AND branch_id = ? ORDER BY expiry_date').all(req.params.id, req.user!.branch_id) as any[])
     .map((b) => ({ ...b, days_left: daysLeft(b.expiry_date), status: expiryStatus(daysLeft(b.expiry_date)) }))));
   r.put('/batches/:id', need('products'), wrap((req) => {
-    const before = db().prepare('SELECT * FROM batches WHERE id = ?').get(req.params.id) as any;
+    const before = db().prepare('SELECT * FROM batches WHERE id = ? AND branch_id = ?').get(req.params.id, branchOf(req)) as any;
     if (!before) throw new BizError('Batch not found.', 'NOT_FOUND', 404);
     const sp = int(req.body.selling_price);
     if (sp < 0) throw new BizError('Price cannot be negative.');
@@ -280,8 +325,9 @@ export function createRouter() {
     const q = `%${String(req.query.q ?? '').trim()}%`;
     const supplier = int(req.query.supplier_id);
     const rows = db().prepare(`SELECT b.*, p.brand_name, p.dosage, p.generic_name FROM batches b JOIN products p ON p.id = b.product_id
+      LEFT JOIN product_branch pb ON pb.product_id = p.id AND pb.branch_id = b.branch_id
       WHERE b.branch_id = ? AND b.quantity > 0 AND (p.brand_name LIKE ? OR b.batch_number LIKE ? OR p.barcode LIKE ?)
-      ${supplier ? 'AND p.supplier_id = ' + supplier : ''} ORDER BY p.brand_name, b.expiry_date LIMIT 100`).all(req.user!.branch_id, q, q, q) as any[];
+      ${supplier ? 'AND pb.supplier_id = ' + supplier : ''} ORDER BY p.brand_name, b.expiry_date LIMIT 100`).all(req.user!.branch_id, q, q, q) as any[];
     return rows.map((b) => ({ ...b, days_left: daysLeft(b.expiry_date) }));
   }));
   r.get('/products/:id/alternatives', wrap((req) => {
@@ -302,13 +348,13 @@ export function createRouter() {
   }));
   r.get('/invoices/:id', need('pos', 'returns', 'shifts', 'dashboard'), wrap((req) => {
     const inv = core.getInvoice(db(), int(req.params.id));
-    if (!inv) throw new BizError('Invoice not found.', 'NOT_FOUND', 404);
+    if (!inv || inv.branch_id !== branchOf(req)) throw new BizError('Invoice not found.', 'NOT_FOUND', 404);
     return inv;
   }));
 
   r.post('/returns', need('returns'), wrap((req) => core.createSalesReturn(db(), actor(req), req.body)));
-  r.get('/returns', need('returns'), wrap(() => db().prepare(`SELECT r.*, i.invoice_number, u.name user_name FROM sales_returns r
-    JOIN invoices i ON i.id = r.invoice_id JOIN users u ON u.id = r.user_id ORDER BY r.id DESC LIMIT 200`).all()));
+  r.get('/returns', need('returns'), wrap((req) => db().prepare(`SELECT r.*, i.invoice_number, u.name user_name FROM sales_returns r
+    JOIN invoices i ON i.id = r.invoice_id JOIN users u ON u.id = r.user_id WHERE i.branch_id = ? ORDER BY r.id DESC LIMIT 200`).all(branchOf(req))));
 
   // ─────────── Prescriptions ───────────
   r.post('/prescriptions', need('doctor'), wrap((req) => {
@@ -332,12 +378,13 @@ export function createRouter() {
     const own = req.user!.role === 'doctor';
     const rows = db().prepare(`SELECT p.*, u.name doctor_name, u.specialty,
       (SELECT COUNT(*) FROM prescription_items WHERE prescription_id = p.id) item_count FROM prescriptions p JOIN users u ON u.id = p.doctor_id
-      ${own ? 'WHERE p.doctor_id = ?' : "WHERE p.destination IN ('pharmacy','both')"} ORDER BY p.id DESC LIMIT 100`).all(...(own ? [req.user!.id] : []));
+      ${own ? 'WHERE p.doctor_id = ?' : "WHERE p.destination IN ('pharmacy','both') AND COALESCE(u.branch_id, (SELECT MIN(id) FROM branches)) = ?"} ORDER BY p.id DESC LIMIT 100`).all(own ? req.user!.id : branchOf(req));
     return rows;
   }));
   r.get('/prescriptions/:id', need('doctor'), wrap((req) => {
-    const p = db().prepare('SELECT p.*, u.name doctor_name FROM prescriptions p JOIN users u ON u.id = p.doctor_id WHERE p.id = ?').get(req.params.id) as any;
-    if (!p) throw new BizError('Request not found.', 'NOT_FOUND', 404);
+    const p = db().prepare(`SELECT p.*, u.name doctor_name, COALESCE(u.branch_id, (SELECT MIN(id) FROM branches)) doctor_branch
+      FROM prescriptions p JOIN users u ON u.id = p.doctor_id WHERE p.id = ?`).get(req.params.id) as any;
+    if (!p || (req.user!.role !== 'doctor' && p.doctor_branch !== branchOf(req))) throw new BizError('Request not found.', 'NOT_FOUND', 404);
     if (req.user!.role === 'doctor' && p.doctor_id !== req.user!.id) throw new BizError('Not allowed.', 'FORBIDDEN', 403);
     p.items = db().prepare(`SELECT pi.*, pr.brand_name, pr.dosage FROM prescription_items pi JOIN products pr ON pr.id = pi.product_id WHERE pi.prescription_id = ?`).all(p.id);
     return p;
@@ -354,15 +401,16 @@ export function createRouter() {
   }));
 
   // ─────────── Purchasing / suppliers ───────────
-  r.get('/suppliers', need('pos', 'products', 'adjust', 'expiry', 'receive', 'rtv', 'transfers', 'supplier'), wrap(() => (db().prepare('SELECT * FROM suppliers ORDER BY name').all() as any[]).map((s) => ({ ...s, balance: core.supplierBalance(db(), s.id) }))));
+  r.get('/suppliers', need('pos', 'products', 'adjust', 'expiry', 'receive', 'rtv', 'transfers', 'supplier'), wrap((req) => (db().prepare('SELECT * FROM suppliers WHERE branch_id = ? ORDER BY name').all(branchOf(req)) as any[]).map((s) => ({ ...s, balance: core.supplierBalance(db(), s.id) }))));
+  const ownSupplier = (req: Request) => { assertBranch(db(), 'suppliers', int(req.params.id), branchOf(req), 'Supplier'); return int(req.params.id); };
   r.post('/suppliers', need('supplier', 'receive'), wrap((req) => {
     if (!String(req.body.name ?? '').trim()) throw new BizError('Supplier name is required.');
-    const id = Number(db().prepare('INSERT INTO suppliers (name,phone) VALUES (?,?)').run(req.body.name.trim(), req.body.phone || null).lastInsertRowid);
+    const id = Number(db().prepare('INSERT INTO suppliers (name,phone,branch_id) VALUES (?,?,?)').run(req.body.name.trim(), req.body.phone || null, branchOf(req)).lastInsertRowid);
     audit(db(), actor(req), 'supplier', 'SUPPLIER_CREATE', { id });
     return { id };
   }));
   r.get('/suppliers/:id/statement', need('supplier'), wrap((req) => {
-    const id = int(req.params.id);
+    const id = ownSupplier(req);
     const ev: { date: string; type: string; ref: string; debit: number; credit: number }[] = [];
     (db().prepare("SELECT * FROM purchase_invoices WHERE supplier_id=? AND status='approved' AND payment_type='credit'").all(id) as any[])
       .forEach((p) => ev.push({ date: p.approved_at, type: 'purchase', ref: p.invoice_number || `#${p.id}`, debit: p.total_cost, credit: 0 }));
@@ -379,6 +427,7 @@ export function createRouter() {
   r.post('/suppliers/:id/payments', need('supplier'), wrap((req) => {
     const amount = int(req.body.amount);
     if (amount <= 0) throw new BizError('Amount must be greater than zero.');
+    ownSupplier(req);
     const kind = req.body.kind === 'old_invoice' ? 'old_invoice' : 'payment';
     if (kind === 'payment' && amount > core.supplierBalance(db(), int(req.params.id))) throw new BizError('Payment is more than the amount owed to this supplier.');
     db().prepare('INSERT INTO supplier_payments (supplier_id,amount,kind,note,user_id,created_at) VALUES (?,?,?,?,?,?)')
@@ -386,44 +435,44 @@ export function createRouter() {
     audit(db(), actor(req), 'supplier', kind === 'payment' ? 'SUPPLIER_PAYMENT' : 'SUPPLIER_OLD_INVOICE', { supplier: req.params.id, amount });
     return { balance: core.supplierBalance(db(), int(req.params.id)) };
   }));
-  r.post('/suppliers/:id/sync', need('supplier'), wrap((req) => ({ balance: core.supplierBalance(db(), int(req.params.id)) })));
+  r.post('/suppliers/:id/sync', need('supplier'), wrap((req) => ({ balance: core.supplierBalance(db(), ownSupplier(req)) })));
 
   r.post('/purchases', need('receive'), wrap((req) => core.savePurchase(db(), actor(req), req.body)));
   r.get('/purchases', need('receive', 'supplier'), wrap((req) => db().prepare(`SELECT pi.*, s.name supplier_name FROM purchase_invoices pi JOIN suppliers s ON s.id = pi.supplier_id
-    ${req.query.status ? 'WHERE pi.status = ?' : ''} ORDER BY pi.id DESC LIMIT 100`).all(...(req.query.status ? [String(req.query.status)] : []))));
+    WHERE pi.branch_id = ? ${req.query.status ? 'AND pi.status = ?' : ''} ORDER BY pi.id DESC LIMIT 100`).all(branchOf(req), ...(req.query.status ? [String(req.query.status)] : []))));
   r.get('/purchases/:id', need('receive', 'supplier'), wrap((req) => {
-    const p = db().prepare('SELECT * FROM purchase_invoices WHERE id = ?').get(req.params.id) as any;
+    const p = db().prepare('SELECT * FROM purchase_invoices WHERE id = ? AND branch_id = ?').get(req.params.id, branchOf(req)) as any;
     if (!p) throw new BizError('Purchase invoice not found.', 'NOT_FOUND', 404);
     p.items = db().prepare(`SELECT i.*, pr.brand_name, pr.dosage FROM purchase_invoice_items i JOIN products pr ON pr.id = i.product_id WHERE i.purchase_invoice_id = ?`).all(p.id);
     return p;
   }));
   r.delete('/purchases/:id', need('receive'), wrap((req) => {
-    const p = db().prepare('SELECT status FROM purchase_invoices WHERE id = ?').get(req.params.id) as any;
+    const p = db().prepare('SELECT status FROM purchase_invoices WHERE id = ? AND branch_id = ?').get(req.params.id, branchOf(req)) as any;
     if (!p || p.status !== 'draft') throw new BizError('Only drafts can be deleted.');
     db().prepare('DELETE FROM purchase_invoices WHERE id = ?').run(req.params.id);
     return { ok: true };
   }));
   r.post('/rtv', need('rtv'), wrap((req) => core.createRtv(db(), actor(req), req.body)));
-  r.get('/rtv', need('rtv'), wrap(() => db().prepare('SELECT r.*, s.name supplier_name FROM rtv r JOIN suppliers s ON s.id = r.supplier_id ORDER BY r.id DESC LIMIT 100').all()));
+  r.get('/rtv', need('rtv'), wrap((req) => db().prepare('SELECT r.*, s.name supplier_name FROM rtv r JOIN suppliers s ON s.id = r.supplier_id WHERE r.branch_id = ? ORDER BY r.id DESC LIMIT 100').all(branchOf(req))));
 
   // Smart auto-reorder: below reorder level, suggested qty from the last 30 days of sales.
   r.get('/reorder', need('products'), wrap((req) => {
     const since = new Date(Date.now() - 30 * 86400_000).toISOString();
-    const rows = db().prepare(`${productSelect} WHERE p.active = 1 AND COALESCE(s.stock,0) <= p.reorder_level ORDER BY p.brand_name`)
+    const rows = db().prepare(`${productSelect} WHERE p.active = 1 AND COALESCE(s.stock,0) <= COALESCE(pb.reorder_level, p.reorder_level) ORDER BY p.brand_name`)
       .all({ today: todayStr(), branch: req.user!.branch_id }) as any[];
     return rows.map((p) => {
       const sold = (db().prepare(`SELECT COALESCE(SUM(ii.quantity),0) q FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
-        WHERE ii.product_id = ? AND i.created_at >= ?`).get(p.id, since) as any).q;
+        WHERE ii.product_id = ? AND i.branch_id = ? AND i.created_at >= ?`).get(p.id, branchOf(req), since) as any).q;
       const suggested = Math.max(p.reorder_level * 2 - p.stock, sold - p.stock, 1);
-      const sup = p.supplier_id ? (db().prepare('SELECT name FROM suppliers WHERE id=?').get(p.supplier_id) as any)?.name : null;
+      const sup = p.supplier_id ? (db().prepare('SELECT name FROM suppliers WHERE id=? AND branch_id=?').get(p.supplier_id, branchOf(req)) as any)?.name : null;
       return { id: p.id, brand_name: p.brand_name, dosage: p.dosage, stock: p.stock, reorder_level: p.reorder_level, sold_30d: sold, suggested, supplier_id: p.supplier_id, supplier_name: sup ?? 'Unassigned', cost: p.cost ?? 0 };
     });
   }));
 
   // ─────────── Stock adjustment / transfers ───────────
   r.post('/adjustments', need('adjust'), wrap((req) => core.adjustStock(db(), actor(req), req.body)));
-  r.get('/adjustments', need('adjust'), wrap(() => db().prepare(`SELECT a.*, p.brand_name, b.batch_number, u.name user_name FROM stock_adjustments a
-    JOIN products p ON p.id = a.product_id JOIN batches b ON b.id = a.batch_id LEFT JOIN users u ON u.id = a.user_id ORDER BY a.id DESC LIMIT 100`).all()));
+  r.get('/adjustments', need('adjust'), wrap((req) => db().prepare(`SELECT a.*, p.brand_name, b.batch_number, u.name user_name FROM stock_adjustments a
+    JOIN products p ON p.id = a.product_id JOIN batches b ON b.id = a.batch_id LEFT JOIN users u ON u.id = a.user_id WHERE b.branch_id = ? ORDER BY a.id DESC LIMIT 100`).all(branchOf(req))));
 
   r.get('/branches', need('pos', 'products', 'adjust', 'expiry', 'receive', 'rtv', 'transfers', 'supplier'), wrap(() => db().prepare('SELECT * FROM branches ORDER BY id').all()));
   r.post('/branches', need('branches'), wrap((req) => {
@@ -438,9 +487,11 @@ export function createRouter() {
     return { ok: true };
   }));
 
-  r.get('/transfers', need('transfers'), wrap(() => {
+  r.get('/transfers', need('transfers'), wrap((req) => {
+    const own = !isAdmin(req);
     const rows = db().prepare(`SELECT t.*, f.name from_name, d.name to_name, u.name user_name FROM stock_transfers t
-      JOIN branches f ON f.id = t.from_branch JOIN branches d ON d.id = t.to_branch LEFT JOIN users u ON u.id = t.user_id ORDER BY t.id DESC LIMIT 100`).all() as any[];
+      JOIN branches f ON f.id = t.from_branch JOIN branches d ON d.id = t.to_branch LEFT JOIN users u ON u.id = t.user_id
+      ${own ? 'WHERE t.from_branch = ? OR t.to_branch = ?' : ''} ORDER BY t.id DESC LIMIT 100`).all(...(own ? [branchOf(req), branchOf(req)] : [])) as any[];
     return rows.map((t) => ({ ...t, items: db().prepare(`SELECT i.*, p.brand_name, b.batch_number FROM stock_transfer_items i JOIN products p ON p.id = i.product_id
       JOIN batches b ON b.id = i.batch_id WHERE i.transfer_id = ?`).all(t.id) }));
   }));
@@ -450,14 +501,17 @@ export function createRouter() {
     if (!['approve', 'receive', 'reject'].includes(a)) throw new BizError('Unknown action.');
     return core.transitionTransfer(db(), actor(req), int(req.params.id), a);
   }));
-  r.get('/branch-batches/:branch', need('transfers'), wrap((req) => db().prepare(`SELECT b.*, p.brand_name, p.dosage FROM batches b JOIN products p ON p.id = b.product_id
+  r.get('/branch-batches/:branch', need('transfers'), wrap((req) => {
+    if (!isAdmin(req) && int(req.params.branch) !== branchOf(req)) throw new BizError('You can only send stock from your own branch.', 'FORBIDDEN', 403);
+    return db().prepare(`SELECT b.*, p.brand_name, p.dosage FROM batches b JOIN products p ON p.id = b.product_id
     WHERE b.branch_id = ? AND b.quantity > 0 AND b.expiry_date >= ? AND p.brand_name LIKE ? ORDER BY p.brand_name LIMIT 100`)
-    .all(req.params.branch, todayStr(), `%${String(req.query.q ?? '')}%`)));
+    .all(req.params.branch, todayStr(), `%${String(req.query.q ?? '')}%`);
+  }));
 
   // ─────────── Customers ───────────
   r.get('/customers', need('customers', 'pos'), wrap((req) => {
     const q = `%${String(req.query.q ?? '').trim()}%`;
-    const rows = db().prepare('SELECT * FROM customers WHERE name LIKE ? OR phone LIKE ? ORDER BY name LIMIT 300').all(q, q) as any[];
+    const rows = db().prepare('SELECT * FROM customers WHERE branch_id = ? AND (name LIKE ? OR phone LIKE ?) ORDER BY name LIMIT 300').all(branchOf(req), q, q) as any[];
     return rows.map((c) => {
       const last = db().prepare('SELECT MAX(created_at) d FROM customer_payments WHERE customer_id = ?').get(c.id) as any;
       const lastQarz = db().prepare('SELECT MAX(created_at) d FROM invoices WHERE customer_id = ? AND qarz_amount > 0').get(c.id) as any;
@@ -468,17 +522,18 @@ export function createRouter() {
   }));
   r.post('/customers', need('customers', 'pos'), wrap((req) => {
     if (!String(req.body.name ?? '').trim()) throw new BizError('Customer name is required.');
-    const id = Number(db().prepare('INSERT INTO customers (name,phone,notes) VALUES (?,?,?)').run(req.body.name.trim(), req.body.phone || null, req.body.notes || null).lastInsertRowid);
+    const id = Number(db().prepare('INSERT INTO customers (name,phone,notes,branch_id) VALUES (?,?,?,?)').run(req.body.name.trim(), req.body.phone || null, req.body.notes || null, branchOf(req)).lastInsertRowid);
     audit(db(), actor(req), 'customers', 'CUSTOMER_CREATE', { id });
     return { id };
   }));
   r.put('/customers/:id', need('customers'), wrap((req) => {
+    assertBranch(db(), 'customers', req.params.id, branchOf(req), 'Customer');
     db().prepare('UPDATE customers SET name=?, phone=?, notes=? WHERE id=?').run(req.body.name, req.body.phone || null, req.body.notes || null, req.params.id);
     return { ok: true };
   }));
   r.get('/customers/:id', need('customers'), wrap((req) => {
     const id = int(req.params.id);
-    const c = db().prepare('SELECT * FROM customers WHERE id = ?').get(id) as any;
+    const c = db().prepare('SELECT * FROM customers WHERE id = ? AND branch_id = ?').get(id, branchOf(req)) as any;
     if (!c) throw new BizError('Customer not found.', 'NOT_FOUND', 404);
     const ev: any[] = [];
     (db().prepare("SELECT id, invoice_number, created_at, qarz_amount FROM invoices WHERE customer_id=? AND qarz_amount>0 AND status='completed'").all(id) as any[])
@@ -501,39 +556,39 @@ export function createRouter() {
   r.post('/shifts/close', need('shifts', 'pos'), wrap((req) => core.closeShift(db(), actor(req), req.body.counted_cash)));
   r.get('/shifts', need('shifts'), wrap((req) => {
     const own = req.user!.role === 'cashier';
-    return db().prepare(`SELECT s.*, u.name user_name FROM shifts s JOIN users u ON u.id = s.user_id ${own ? 'WHERE s.user_id = ?' : ''} ORDER BY s.id DESC LIMIT 60`)
-      .all(...(own ? [req.user!.id] : []));
+    return db().prepare(`SELECT s.*, u.name user_name FROM shifts s JOIN users u ON u.id = s.user_id WHERE s.branch_id = ? ${own ? 'AND s.user_id = ?' : ''} ORDER BY s.id DESC LIMIT 60`)
+      .all(branchOf(req), ...(own ? [req.user!.id] : []));
   }));
   r.get('/shifts/:id', need('shifts'), wrap((req) => {
     const s = core.shiftSummary(db(), int(req.params.id));
-    if (!s) throw new BizError('Shift not found.', 'NOT_FOUND', 404);
+    if (!s || s.branch_id !== branchOf(req)) throw new BizError('Shift not found.', 'NOT_FOUND', 404);
     if (req.user!.role === 'cashier' && s.user_id !== req.user!.id) throw new BizError('Not allowed.', 'FORBIDDEN', 403);
     const invoices = db().prepare('SELECT id, invoice_number, created_at, grand_total, payment_method, cash_amount, card_amount, qarz_amount FROM invoices WHERE shift_id = ? ORDER BY id DESC').all(s.id);
-    return { ...s, invoices, pharmacy: (db().prepare("SELECT value FROM settings WHERE key='pharmacy_name'").get() as any)?.value };
+    return { ...s, invoices, pharmacy: displayName(s.branch_id) };
   }));
 
   // ─────────── Accounting ───────────
   r.get('/pnl', need('accounting'), wrap((req) => {
     const from = String(req.query.from || todayStr(new Date(Date.now() - 29 * 86400_000)));
     const to = String(req.query.to || todayStr());
-    const total = core.profitAndLoss(db(), from, to);
+    const total = core.profitAndLoss(db(), from, to, branchOf(req));
     const series: any[] = [];
     const start = new Date(from + 'T00:00:00'), end = new Date(to + 'T00:00:00');
     for (let d = new Date(start); d <= end && series.length < 400; d.setDate(d.getDate() + 1)) {
       const day = todayStr(d);
-      const p = core.profitAndLoss(db(), day, day);
+      const p = core.profitAndLoss(db(), day, day, branchOf(req));
       series.push({ date: day, revenue: p.net_revenue, profit: p.net_profit });
     }
     return { ...total, series };
   }));
-  r.get('/expenses', need('accounting'), wrap((req) => db().prepare('SELECT * FROM expenses WHERE date BETWEEN ? AND ? ORDER BY date DESC, id DESC')
-    .all(String(req.query.from || '0000-01-01'), String(req.query.to || '9999-12-31'))));
+  r.get('/expenses', need('accounting'), wrap((req) => db().prepare('SELECT * FROM expenses WHERE branch_id = ? AND date BETWEEN ? AND ? ORDER BY date DESC, id DESC')
+    .all(branchOf(req), String(req.query.from || '0000-01-01'), String(req.query.to || '9999-12-31'))));
   r.post('/expenses', need('accounting'), wrap((req) => {
     const amount = int(req.body.amount);
     if (amount <= 0) throw new BizError('Amount must be greater than zero.');
     if (!['rent', 'salaries', 'utilities', 'other'].includes(req.body.category)) throw new BizError('Choose a category.');
-    const id = Number(db().prepare('INSERT INTO expenses (category,amount,note,date,user_id) VALUES (?,?,?,?,?)')
-      .run(req.body.category, amount, req.body.note || null, req.body.date || todayStr(), req.user!.id).lastInsertRowid);
+    const id = Number(db().prepare('INSERT INTO expenses (category,amount,note,date,user_id,branch_id) VALUES (?,?,?,?,?,?)')
+      .run(req.body.category, amount, req.body.note || null, req.body.date || todayStr(), req.user!.id, branchOf(req)).lastInsertRowid);
     audit(db(), actor(req), 'accounting', 'EXPENSE_ADD', { id, amount, category: req.body.category });
     return { id };
   }));
