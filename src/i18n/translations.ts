@@ -183,7 +183,6 @@ export const dictionary: Record<string, T> = {
   unit_packs: ['packs', 'پاکێت', 'علبة'],
   unit_sheets: ['sheets', 'شریت', 'شريط'],
   choose_unit: ['Sell a pack or a sheet?', 'پاکێت یان شریت دەفرۆشیت؟', 'بيع علبة أم شريط؟'],
-  keep_extra: ['Sell at the amount received', 'بە بڕی وەرگیراو بفرۆشە', 'البيع بالمبلغ المستلم'],
   extra_amount: ['Extra', 'زیادە', 'زيادة'],
   hold: ['Hold', 'هەڵگرتن', 'تعليق'],
   pay: ['Pay', 'پارەدان', 'دفع'],

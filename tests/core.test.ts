@@ -42,14 +42,14 @@ test('nobody can change the selling price at the till (admin included)', () => {
   assert.equal(core.getInvoice(db, r2.id).grand_total, 3000); // no override = list price
 });
 
-test('keep extra: full amount received counts as the sale (no change)', () => {
-  const p = prod('Keep'); batch(p, 'K1', day(200), 5, 1500, 3000);
-  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 4000, extra_amount: 1000 });
+test('nobody can sell above the price: extra cash is given back as change', () => {
+  const p = prod('Keep'); batch(p, 'K1', day(200), 5, 1500, 1000);
+  const admin = { ...actor, role: 'super_admin' };
+  throwsCode(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 3000, extra_amount: 2000 }), 'FORBIDDEN');
+  throwsCode(() => core.checkout(db, admin, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 3000, extra_amount: 2000 }), 'FORBIDDEN');
+  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 3000 });
   const inv = core.getInvoice(db, r.id);
-  assert.equal(inv.grand_total, 4000);
-  assert.equal(inv.change_amount, 0);
-  assert.equal(inv.cash_amount, 4000);
-  assert.equal(inv.discount_amount, -1000);
+  assert.equal(inv.grand_total, 1000); assert.equal(inv.cash_amount, 1000); assert.equal(inv.change_amount, 2000); assert.equal(inv.discount_amount, 0);
 });
 
 test('sell by pack or by sheet: opens a pack, tracks loose sheets, no overselling', () => {

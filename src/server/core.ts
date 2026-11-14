@@ -58,7 +58,7 @@ export interface CheckoutInput {
   card_amount?: number;
   discount_pct?: number;
   discount_amount?: number;
-  extra_amount?: number; // amount added on top (flexible pricing)
+  extra_amount?: number; // no longer allowed: selling above the catalogue price is blocked
   prescription_id?: number | null;
 }
 
@@ -198,8 +198,10 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
         ? 'You are not allowed to give a discount on this sale.'
         : `Discount is above your limit. The most you can give on this sale is ${cap.toLocaleString('en-US')} IQD.`, 'DISCOUNT_OVER_LIMIT');
     }
-    const extra = Math.max(0, int(input.extra_amount));
-    const grand = subtotal - discount + extra;
+    // Nobody may charge more than the catalogue price ("sell at the amount received" was removed).
+    if (int(input.extra_amount) !== 0) throw new BizError('Selling above the price is not allowed.', 'FORBIDDEN', 403);
+    const extra = 0;
+    const grand = subtotal - discount;
 
     let cash = 0, card = 0, qarz = 0, received = 0, change = 0;
     const method = input.payment_method;
