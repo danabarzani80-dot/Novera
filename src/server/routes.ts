@@ -123,7 +123,7 @@ export function createRouter() {
   r.get('/auth/me', wrap((req) => {
     const name = (db().prepare("SELECT value FROM settings WHERE key='pharmacy_name'").get() as any)?.value ?? '';
     const shift = core.activeShift(db(), req.user!.id) ?? null;
-    const branch = db().prepare('SELECT id, name FROM branches WHERE id = ?').get(branchOf(req)) as any;
+    const branch = db().prepare('SELECT id, name, flexible_prices FROM branches WHERE id = ?').get(branchOf(req)) as any;
     const branches = isAdmin(req) ? db().prepare('SELECT id, name FROM branches ORDER BY id').all() : [];
     return { user: req.user, pharmacyName: displayName(branchOf(req)), settingsPharmacyName: name, branch, branches, shift };
   }));
@@ -501,8 +501,12 @@ export function createRouter() {
     return { id };
   }));
   r.put('/branches/:id', need('branches'), wrap((req) => {
-    db().prepare('UPDATE branches SET name=?, address=?, phone=? WHERE id=?').run(req.body.name, req.body.address || null, req.body.phone || null, req.params.id);
-    audit(db(), actor(req), 'branches', 'BRANCH_UPDATE', { id: req.params.id });
+    const before = db().prepare('SELECT * FROM branches WHERE id = ?').get(req.params.id) as any;
+    if (!before) throw new BizError('Branch not found.', 'NOT_FOUND', 404);
+    // Flexible prices (staff may type the price at the till) can only be switched by the admin.
+    const flex = req.body.flexible_prices === undefined || !isAdmin(req) ? before.flexible_prices : (req.body.flexible_prices ? 1 : 0);
+    db().prepare('UPDATE branches SET name=?, address=?, phone=?, flexible_prices=? WHERE id=?').run(req.body.name, req.body.address || null, req.body.phone || null, flex, req.params.id);
+    audit(db(), actor(req), 'branches', 'BRANCH_UPDATE', { id: req.params.id, ...(flex !== before.flexible_prices ? { flexible_prices: { before: before.flexible_prices, after: flex } } : {}) });
     return { ok: true };
   }));
 

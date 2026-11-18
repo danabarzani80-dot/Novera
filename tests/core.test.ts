@@ -33,13 +33,35 @@ test('FEFO takes the earliest-expiring batch first and spans batches', () => {
   assert.equal(inv.items.find((i: any) => i.batch_number === 'EARLY').purchase_price, 80); // stored for COGS
 });
 
-test('nobody can change the selling price at the till (admin included)', () => {
+test('fixed-price branch (Novera): nobody can change the selling price at the till (admin included)', () => {
   const p = prod('Flex'); batch(p, 'F1', day(200), 5, 1500, 3000);
   const admin = { ...actor, role: 'super_admin' };
   throwsCode(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit_price: 4000 }], payment_method: 'cash', cash_received: 5000 }), 'FORBIDDEN');
   throwsCode(() => core.checkout(db, admin, { items: [{ product_id: p, quantity: 1, unit_price: 2000 }], payment_method: 'cash', cash_received: 5000 }), 'FORBIDDEN');
   const r2 = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1 }], payment_method: 'cash', cash_received: 3000 });
   assert.equal(core.getInvoice(db, r2.id).grand_total, 3000); // no override = list price
+});
+
+test('flexible-price branch (Link): staff can type a higher or lower price; logged; 250 steps', () => {
+  const f = openDatabase(':memory:');
+  f.prepare("INSERT INTO branches (name, flexible_prices) VALUES ('Link Pharmacy', 1)").run(); // branch 2
+  const u = Number(f.prepare("INSERT INTO users (name,username,password_hash,role,branch_id) VALUES ('L','l','x','cashier',2)").run().lastInsertRowid);
+  const link = { id: u, role: 'cashier', branch_id: 2 };
+  core.openShift(f, link, 0);
+  const p = Number(f.prepare("INSERT INTO products (brand_name, sheets_per_pack) VALUES ('Med', 2)").run().lastInsertRowid);
+  f.prepare("INSERT INTO batches (product_id,branch_id,batch_number,expiry_date,quantity,purchase_price,selling_price) VALUES (?,2,'L1',?,10,1000,3000)").run(p, day(200));
+  const up = core.checkout(f, link, { items: [{ product_id: p, quantity: 2, unit_price: 5000 }], payment_method: 'cash', cash_received: 10000 });
+  assert.equal(core.getInvoice(f, up.id).grand_total, 10000); // real price 5,000 instead of 3,000
+  const down = core.checkout(f, link, { items: [{ product_id: p, quantity: 1, unit: 'sheet', unit_price: 1250 }], payment_method: 'cash', cash_received: 1250 });
+  assert.equal(core.getInvoice(f, down.id).grand_total, 1250);
+  const logged = f.prepare("SELECT details_json details FROM audit_logs WHERE action_code='PRICE_AT_TILL'").all() as any[];
+  assert.equal(logged.length, 2);
+  assert.deepEqual(JSON.parse(logged[0].details), { invoice: core.getInvoice(f, up.id).invoice_number, branch: 2, product_id: p, unit: 'pack', list_price: 3000, sold_price: 5000 });
+  throwsCode(() => core.checkout(f, link, { items: [{ product_id: p, quantity: 1, unit_price: 3100 }], payment_method: 'cash', cash_received: 5000 }), 'PRICE_INVALID');
+  throwsCode(() => core.checkout(f, link, { items: [{ product_id: p, quantity: 1, unit_price: 0 }], payment_method: 'cash', cash_received: 5000 }), 'PRICE_INVALID');
+  // Switching the branch back to fixed prices blocks it again.
+  f.prepare('UPDATE branches SET flexible_prices = 0 WHERE id = 2').run();
+  throwsCode(() => core.checkout(f, link, { items: [{ product_id: p, quantity: 1, unit_price: 5000 }], payment_method: 'cash', cash_received: 5000 }), 'FORBIDDEN');
 });
 
 test('nobody can sell above the price: extra cash is given back as change', () => {

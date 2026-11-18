@@ -107,21 +107,28 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
     type Unit = 'pack' | 'sheet' | 'tablet';
     type Line = { product_id: number; batch_id: number; quantity: number; unit_price: number; purchase_price: number; total: number; sale_unit: Unit; unit_size: number; pack_size: number };
     const lines: Line[] = [];
+    // Flexible prices: only in a branch where the admin has switched it on (Link while its prices are being checked).
+    const flexible = !!(db.prepare('SELECT flexible_prices f FROM branches WHERE id = ?').get(actor.branch_id) as any)?.f;
+    const priceChanges: { product_id: number; unit: string; list_price: number; sold_price: number }[] = [];
     // Aggregate requested quantity per product + unit (+ explicit batch). Quantity is in the chosen unit.
     const wanted = new Map<string, { product_id: number; batch_id?: number; quantity: number; unit_price?: number; unit: Unit }>();
     for (const it of input.items) {
       const q = int(it.quantity);
       if (q <= 0) throw new BizError('Quantity must be greater than zero.');
       const unit: Unit = it.unit === 'sheet' || it.unit === 'tablet' ? it.unit : 'pack';
-      // Prices can't be changed at the till by anyone (admin included): the catalogue price is always used.
-      // The only way to lower a sale is a discount within the admin-set limit.
+      // Price typed at the till: only allowed where the branch has flexible prices switched on.
+      // Elsewhere the catalogue price is always used, and a discount within the admin-set limit is the only way to lower a sale.
+      let override: number | undefined;
       if (it.unit_price !== undefined && it.unit_price !== null && String(it.unit_price) !== '') {
-        throw new BizError('Prices cannot be changed at the till. Use a discount within your limit instead.', 'FORBIDDEN', 403);
+        if (!flexible) throw new BizError('Prices cannot be changed at the till. Use a discount within your limit instead.', 'FORBIDDEN', 403);
+        override = Number(it.unit_price);
+        if (!Number.isInteger(override) || override <= 0) throw new BizError('Price must be a whole amount above zero.', 'PRICE_INVALID');
+        if (override % NOTE_STEP !== 0) throw new BizError(`Price must be in steps of ${NOTE_STEP} IQD.`, 'PRICE_INVALID');
       }
       const key = `${it.product_id}:${it.batch_id ?? ''}:${unit}`;
       const w = wanted.get(key);
-      if (w) w.quantity += q;
-      else wanted.set(key, { product_id: it.product_id, batch_id: it.batch_id, quantity: q, unit });
+      if (w) { w.quantity += q; if (override !== undefined) w.unit_price = override; }
+      else wanted.set(key, { product_id: it.product_id, batch_id: it.batch_id, quantity: q, unit_price: override, unit });
     }
 
     // In-memory stock per batch for this sale, so packs, sheets and tablets of the same medicine never oversell.
@@ -155,6 +162,8 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
       const costOf = (b: any) => (b.purchase_price * size) / pack;
       const push = (b: any, n: number) => {
         const price = priceOf(b);
+        if (w.unit_price !== undefined && w.unit_price !== defaultPrice(b) && !priceChanges.some((c) => c.product_id === w.product_id && c.unit === unit))
+          priceChanges.push({ product_id: w.product_id, unit, list_price: defaultPrice(b), sold_price: w.unit_price });
         lines.push({ product_id: w.product_id, batch_id: b.id, quantity: n, unit_price: price, purchase_price: costOf(b), total: Math.round(price * n), sale_unit: unit, unit_size: size, pack_size: pack });
         take(b, n);
       };
@@ -259,7 +268,10 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
     audit(db, actor, 'pos', 'POS_CHECKOUT', {
       invoice: invoiceNumber, subtotal, total: grand, method, lines: lines.length,
       discount, discount_by: discount > 0 ? { user_id: actor.id, username: by, role: actor.role, limit_pct: pctLimit, cap } : null,
+      price_changes: priceChanges.length,
     });
+    // Every price typed at the till is logged with the catalogue price, so the admin can review them item by item.
+    for (const c of priceChanges) audit(db, actor, 'pos', 'PRICE_AT_TILL', { invoice: invoiceNumber, branch: actor.branch_id, ...c });
     return { id: invoiceId, invoice_number: invoiceNumber };
   })();
 }

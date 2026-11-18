@@ -20,7 +20,9 @@ const emptyCart = (id: number): Cart => ({ id, lines: [], customer: null, discAm
 
 export default function POSScreen({ onSold }: { onSold: () => void }) {
   const { t } = useI18n();
-  const { shift, refresh, user } = useAuth();
+  const { shift, refresh, user, branch } = useAuth();
+  // Flexible prices: in a branch where the admin switched it on (Link), staff can type the price for each line.
+  const flexible = !!branch?.flexible_prices;
   // This user's discount ceiling (% set by the admin; the server checks it again on every sale).
   const discLimit = useLoad(() => api.get('/pos/discount-limit'), [user?.id]);
   const { toast } = useToast();
@@ -107,6 +109,11 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
   });
 
 
+  const setPrice = (k: string, price: number) => patch({
+    lines: cart.lines.map((l) => (lkey(l) === k ? { ...l, unit_price: Math.max(0, price) } : l)),
+  });
+  const badPrice = flexible && cart.lines.some((l) => l.unit_price <= 0 || l.unit_price % 250 !== 0);
+
   const subtotal = cart.lines.reduce((s, l) => s + l.unit_price * l.quantity, 0);
   // Discount: dinars only, 250 IQD steps, up to subtotal × role % rounded down to 250. Closed while the cap is 0.
   const discCap = discLimit.data ? discountCap(subtotal, user?.role ?? '', discLimit.data.pct) : 0;
@@ -148,6 +155,7 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
   const validate = (): string | null => {
     if (!shift) return t('err_no_shift');
     if (!cart.lines.length) return t('err_empty_cart');
+    if (badPrice) return t('err_price_step');
     if (discTyped !== 0 && discProblem) return discProblem === 'cap' ? t('err_discount_cap', { n: discCap.toLocaleString('en-US') }) : t('err_discount_step');
     if (cart.method === 'qarz' && !cart.customer) return t('err_qarz_customer');
     if (cart.method === 'cash' && received && received < total) return t('err_received_less');
@@ -162,7 +170,8 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
 
   const doCheckout = async () => {
     const r = await run(() => api.post('/checkout', {
-      items: cart.lines.map((l) => ({ product_id: l.product_id, quantity: l.quantity, unit: l.unit ?? 'pack' })),
+      items: cart.lines.map((l) => ({ product_id: l.product_id, quantity: l.quantity, unit: l.unit ?? 'pack',
+        ...(flexible && l.list_price !== undefined && l.unit_price !== l.list_price ? { unit_price: l.unit_price } : {}) })),
       customer_id: cart.customer?.id ?? null, payment_method: cart.method,
       cash_received: cart.method === 'card' ? 0 : received || (cart.method === 'qarz' ? 0 : cashDue),
       card_amount: cart.method === 'mixed' ? cardAmt : 0,
@@ -297,6 +306,12 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
                       <button className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 flex items-center justify-center" onClick={() => setQty(lkey(l), l.quantity - 1)}><Minus size={14} /></button>
                       <input className="w-12 text-center text-sm font-bold border rounded-lg py-1" value={l.quantity} onChange={(e) => setQty(lkey(l), parseNum(e.target.value) || 1)} />
                       <button className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 flex items-center justify-center" onClick={() => setQty(lkey(l), l.quantity + 1)}><Plus size={14} /></button>
+                      {flexible && <span className="text-xs text-slate-500 ms-2">×</span>}
+                      {flexible && (
+                        <input className={`w-20 text-center text-sm font-bold border rounded-lg py-1 ${l.unit_price <= 0 || l.unit_price % 250 !== 0 ? 'border-red-400 bg-red-50' : l.list_price !== undefined && l.unit_price !== l.list_price ? 'border-amber-400 bg-amber-50' : ''}`}
+                          inputMode="numeric" title={t('price_at_till')} value={l.unit_price}
+                          onFocus={(e) => e.target.select()} onChange={(e) => setPrice(lkey(l), parseNum(e.target.value))} />
+                      )}
                     </div>
                     <b className="text-sm">{iqd(l.unit_price * l.quantity)}</b>
                   </div>

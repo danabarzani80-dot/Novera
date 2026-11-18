@@ -437,6 +437,10 @@ export const dictionary: Record<string, T> = {
   exp_other: ['Other', 'هی تر', 'أخرى'],
 
   // ── Admin ──
+  price_at_till: ['Price', 'نرخ', 'السعر'],
+  err_price_step: ['Each price must be above zero and in steps of 250 IQD.', 'هەر نرخێک دەبێت لە سەرووی سفر بێت و بە هەنگاوی ٢٥٠ دینار بێت.', 'يجب أن يكون كل سعر أكبر من صفر وبخطوات 250 دينار.'],
+  flexible_prices: ['Staff can change prices at the till', 'کارمەندان دەتوانن نرخ لە کاشێر بگۆڕن', 'يمكن للموظفين تغيير الأسعار عند الدفع'],
+  flexible_prices_hint: ['Use while this branch\'s prices are being checked. Every changed price is saved in the audit log.', 'بەکاری بهێنە تا نرخەکانی ئەم لقە پشکنین دەکرێن. هەر نرخێکی گۆڕاو لە تۆماری چاودێری پاشەکەوت دەکرێت.', 'استخدمه أثناء مراجعة أسعار هذا الفرع. يُحفظ كل سعر مُعدّل في سجل التدقيق.'],
   switch_branch: ['Switch branch', 'گۆڕینی لق', 'تبديل الفرع'],
   add_branch: ['Add branch', 'زیادکردنی لق', 'إضافة فرع'],
   add_user: ['Add user', 'زیادکردنی بەکارهێنەر', 'إضافة مستخدم'],

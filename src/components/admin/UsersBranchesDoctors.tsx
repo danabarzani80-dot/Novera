@@ -21,11 +21,13 @@ function Branches() {
     <div className="max-w-4xl mx-auto">
       <PageTitle icon={<Building2 className="text-blue-600" />} title={t('nav_branches')} right={<button className="btn-primary" onClick={() => setF({ name: '', address: '', phone: '' })}><Plus size={16} />{t('add_branch')}</button>} />
       {loading ? <Skeleton /> : <div className="card !p-0 overflow-x-auto"><table className="w-full"><thead><tr><th className="th">{t('name')}</th><th className="th">{t('address')}</th><th className="th">{t('phone')}</th><th className="th" /></tr></thead>
-        <tbody>{data.map((b: any) => <tr key={b.id}><td className="td font-bold">{b.name}</td><td className="td">{b.address}</td><td className="td">{b.phone}</td><td className="td"><button className="p-1.5 text-slate-500 hover:text-blue-600" onClick={() => setF(b)}><Pencil size={16} /></button></td></tr>)}</tbody></table></div>}
+        <tbody>{data.map((b: any) => <tr key={b.id}><td className="td font-bold">{b.name}</td><td className="td">{b.address}</td><td className="td">{b.phone}{b.flexible_prices ? <span className="ms-2 text-[11px] px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-700">{t('flexible_prices')}</span> : null}</td><td className="td"><button className="p-1.5 text-slate-500 hover:text-blue-600" onClick={() => setF(b)}><Pencil size={16} /></button></td></tr>)}</tbody></table></div>}
       {f && <Modal title={f.id ? t('edit') : t('add_branch')} onClose={() => setF(null)} footer={<><button className="btn-ghost" onClick={() => setF(null)}>{t('cancel')}</button><button className="btn-primary" disabled={busy || !f.name.trim()} onClick={save}>{t('save')}</button></>}>
         <div className="space-y-3"><Field label={t('name')}><input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
           <Field label={t('address')}><input className="input" value={f.address ?? ''} onChange={(e) => setF({ ...f, address: e.target.value })} /></Field>
-          <Field label={t('phone')}><input className="input" value={f.phone ?? ''} onChange={(e) => setF({ ...f, phone: e.target.value })} /></Field></div></Modal>}
+          <Field label={t('phone')}><input className="input" value={f.phone ?? ''} onChange={(e) => setF({ ...f, phone: e.target.value })} /></Field>
+          <label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" checked={!!f.flexible_prices} onChange={(e) => setF({ ...f, flexible_prices: e.target.checked ? 1 : 0 })} />
+            <span><b>{t('flexible_prices')}</b><br /><span className="text-slate-500">{t('flexible_prices_hint')}</span></span></label></div></Modal>}
     </div>
   );
 }

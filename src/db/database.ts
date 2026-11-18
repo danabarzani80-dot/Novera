@@ -36,6 +36,8 @@ export function openDatabase(file: string): DB {
   // this change belongs to the first branch (the original pharmacy).
   const first = (db.prepare('SELECT MIN(id) id FROM branches').get() as { id: number }).id;
   db.transaction(() => {
+    // Per-branch switch: may staff type a different price at the till? Off by default (Novera stays fixed).
+    addCol('branches', 'flexible_prices', 'INTEGER NOT NULL DEFAULT 0');
     for (const t of ['suppliers', 'customers', 'expenses', 'rtv']) {
       if (addCol(t, 'branch_id', 'INTEGER')) db.prepare(`UPDATE ${t} SET branch_id = ?`).run(first);
     }

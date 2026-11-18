@@ -3,7 +3,7 @@ import { api } from './api';
 import type { SessionUser } from '../types/pharmacy';
 
 export interface ActiveShift { id: number; opened_at: string; opening_cash: number; receipts?: number }
-export interface BranchRef { id: number; name: string }
+export interface BranchRef { id: number; name: string; flexible_prices?: number }
 interface AuthState {
   user: SessionUser | null;
   /** Name for receipts/header: the branch's name when there are several branches. */
