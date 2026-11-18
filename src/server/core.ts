@@ -273,6 +273,24 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
     });
     // Every price typed at the till is logged with the catalogue price, so the admin can review them item by item.
     for (const c of priceChanges) audit(db, actor, 'pos', 'PRICE_AT_TILL', { invoice: invoiceNumber, branch: actor.branch_id, ...c });
+    // A price typed at the till is a correction: it becomes this branch's price for that medicine from now on
+    // (pack price on every batch in the branch, or the branch's sheet / tablet price). Each change is logged.
+    for (const c of priceChanges) {
+      if (c.unit === 'pack') {
+        const bs = db.prepare('SELECT id, selling_price FROM batches WHERE product_id = ? AND branch_id = ? AND selling_price <> ?')
+          .all(c.product_id, actor.branch_id, c.sold_price) as { id: number; selling_price: number }[];
+        for (const b of bs) {
+          db.prepare('UPDATE batches SET selling_price = ? WHERE id = ?').run(c.sold_price, b.id);
+          audit(db, actor, 'products', 'PRICE_CHANGE', { batch: b.id, before: b.selling_price, after: c.sold_price, source: 'till', invoice: invoiceNumber });
+        }
+      } else {
+        const col = c.unit === 'sheet' ? 'sheet_price' : 'tablet_price';
+        const before = (db.prepare(`SELECT ${col} v FROM product_branch WHERE product_id = ? AND branch_id = ?`).get(c.product_id, actor.branch_id) as any)?.v ?? null;
+        db.prepare(`INSERT INTO product_branch (product_id, branch_id, ${col}) VALUES (?, ?, ?)
+          ON CONFLICT(product_id, branch_id) DO UPDATE SET ${col} = excluded.${col}`).run(c.product_id, actor.branch_id, c.sold_price);
+        audit(db, actor, 'products', 'PRICE_CHANGE', { product: c.product_id, unit: c.unit, before, after: c.sold_price, source: 'till', invoice: invoiceNumber });
+      }
+    }
     return { id: invoiceId, invoice_number: invoiceNumber };
   })();
 }
