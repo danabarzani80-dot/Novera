@@ -57,6 +57,12 @@ test('flexible-price branch (Link): staff can type a higher or lower price; logg
   const logged = f.prepare("SELECT details_json details FROM audit_logs WHERE action_code='PRICE_AT_TILL'").all() as any[];
   assert.equal(logged.length, 2);
   assert.deepEqual(JSON.parse(logged[0].details), { invoice: core.getInvoice(f, up.id).invoice_number, branch: 2, product_id: p, unit: 'pack', list_price: 3000, sold_price: 5000 });
+  // The corrected till price is saved as the branch's new price: next sale uses it without typing.
+  assert.equal((f.prepare('SELECT selling_price s FROM batches WHERE product_id = ?').get(p) as any).s, 5000);
+  assert.equal((f.prepare('SELECT sheet_price s FROM product_branch WHERE product_id = ? AND branch_id = 2').get(p) as any).s, 1250);
+  const next = core.checkout(f, link, { items: [{ product_id: p, quantity: 1, unit: 'sheet' }], payment_method: 'cash', cash_received: 1250 });
+  assert.equal(core.getInvoice(f, next.id).grand_total, 1250);
+  assert.equal((f.prepare("SELECT COUNT(*) c FROM audit_logs WHERE action_code='PRICE_CHANGE'").get() as any).c, 2);
   throwsCode(() => core.checkout(f, link, { items: [{ product_id: p, quantity: 1, unit_price: 3100 }], payment_method: 'cash', cash_received: 5000 }), 'PRICE_INVALID');
   throwsCode(() => core.checkout(f, link, { items: [{ product_id: p, quantity: 1, unit_price: 0 }], payment_method: 'cash', cash_received: 5000 }), 'PRICE_INVALID');
   // Switching the branch back to fixed prices blocks it again.
