@@ -28,7 +28,7 @@ for (const f of files) {
 ['expired', 'critical', 'warning', 'good'].forEach((r) => used.add('st_' + r));
 ['rent', 'salaries', 'utilities', 'other'].forEach((r) => used.add('exp_' + r));
 ['pending', 'approved', 'received', 'rejected'].forEach((r) => used.add('tr_' + r));
-['super_admin', 'pharmacist', 'cashier', 'warehouse_manager', 'doctor'].forEach((r) => used.add('role_' + r));
+['super_admin', 'pharmacist', 'cashier', 'warehouse_manager', 'doctor', 'accountant'].forEach((r) => used.add('role_' + r));
 
 
 if (process.argv.includes('--list')) { console.log([...used].filter((k) => KEYLIKE.test(k) || true).sort().join('\n')); process.exit(0); }
