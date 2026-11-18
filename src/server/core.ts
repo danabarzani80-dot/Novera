@@ -1,5 +1,5 @@
 import type { DB } from '../db/database';
-import { DISCOUNT_ROLES, NOTE_STEP, checkDiscount, cleanPct, discountCap, discountSettingKey, type DiscountRole } from '../lib/discount';
+import { DISCOUNT_ROLES, NOTE_STEP, roundNote, checkDiscount, cleanPct, discountCap, discountSettingKey, type DiscountRole } from '../lib/discount';
 
 export class BizError extends Error {
   status: number;
@@ -155,9 +155,10 @@ export function checkout(db: DB, actor: Actor, input: CheckoutInput) {
         const fromLoose = Math.min(need, x.loose); x.loose -= fromLoose; need -= fromLoose;
         if (need > 0) { const open = Math.ceil(need / pack); x.packs -= open; x.loose += open * pack - need; }
       };
-      const defaultPrice = (b: any) => unit === 'pack' ? b.selling_price
-        : unit === 'sheet' ? (product.sheet_price ?? Math.round(b.selling_price / spp))
-        : (product.tablet_price ?? Math.round(b.selling_price / pack));
+      // Every price is payable in notes: pack, sheet and tablet prices are rounded to 250 IQD.
+      const defaultPrice = (b: any) => roundNote(unit === 'pack' ? b.selling_price
+        : unit === 'sheet' ? (product.sheet_price ?? b.selling_price / spp)
+        : (product.tablet_price ?? b.selling_price / pack));
       const priceOf = (b: any) => w.unit_price ?? defaultPrice(b);
       const costOf = (b: any) => (b.purchase_price * size) / pack;
       const push = (b: any, n: number) => {
@@ -355,7 +356,7 @@ function savePurchaseItems(db: DB, id: number, items: PurchaseItemInput[]) {
     if (c < 0) throw new BizError('Cost price cannot be negative.');
     total += q * c;
     db.prepare(`INSERT INTO purchase_invoice_items (purchase_invoice_id,product_id,batch_number,expiry_date,quantity,cost_price,margin_pct,selling_price)
-      VALUES (?,?,?,?,?,?,?,?)`).run(id, it.product_id, it.batch_number || null, it.expiry_date || null, q, c, Number(it.margin_pct) || 0, int(it.selling_price));
+      VALUES (?,?,?,?,?,?,?,?)`).run(id, it.product_id, it.batch_number || null, it.expiry_date || null, q, c, Number(it.margin_pct) || 0, roundNote(int(it.selling_price)));
   }
   db.prepare('UPDATE purchase_invoices SET total_cost = ? WHERE id = ?').run(total, id);
   return total;
@@ -385,10 +386,10 @@ export function savePurchase(db: DB, actor: Actor, input: { id?: number; supplie
           .get(it.product_id, actor.branch_id, it.batch_number, it.expiry_date) as any;
         if (ex) {
           db.prepare('UPDATE batches SET quantity = quantity + ?, purchase_price = ?, selling_price = ? WHERE id = ?')
-            .run(int(it.quantity), int(it.cost_price), int(it.selling_price), ex.id);
+            .run(int(it.quantity), int(it.cost_price), roundNote(int(it.selling_price)), ex.id);
         } else {
           db.prepare('INSERT INTO batches (product_id,branch_id,batch_number,expiry_date,quantity,purchase_price,selling_price) VALUES (?,?,?,?,?,?,?)')
-            .run(it.product_id, actor.branch_id, it.batch_number, it.expiry_date, int(it.quantity), int(it.cost_price), int(it.selling_price));
+            .run(it.product_id, actor.branch_id, it.batch_number, it.expiry_date, int(it.quantity), int(it.cost_price), roundNote(int(it.selling_price)));
         }
       }
       db.prepare("UPDATE purchase_invoices SET status='approved', approved_at=? WHERE id=?").run(nowIso(), id);

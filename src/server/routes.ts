@@ -9,6 +9,7 @@ import Database from 'better-sqlite3';
 import { DATA_DIR, DB_FILE, closeDb, getDb, openDatabase, setDb } from '../db/database';
 import { can, type Module, type Role, type SessionUser } from '../types/pharmacy';
 import * as core from './core';
+import { roundNote } from '../lib/discount';
 import { BizError, assertBranch, audit, daysLeft, expiryStatus, nowIso, todayStr } from './core';
 
 declare module 'express-serve-static-core' {
@@ -259,9 +260,9 @@ export function createRouter() {
     unit: b.unit || 'tablet', shelf_rack: b.shelf_rack || null, is_rx: b.is_rx ? 1 : 0, reorder_level: int(b.reorder_level ?? 10),
     supplier_id: b.supplier_id ? int(b.supplier_id) : null,
     sheets_per_pack: Math.max(1, int(b.sheets_per_pack) || 1),
-    sheet_price: b.sheet_price !== undefined && b.sheet_price !== null && String(b.sheet_price) !== '' && int(b.sheet_price) > 0 ? int(b.sheet_price) : null,
+    sheet_price: b.sheet_price !== undefined && b.sheet_price !== null && String(b.sheet_price) !== '' && int(b.sheet_price) > 0 ? roundNote(int(b.sheet_price)) : null,
     tablets_per_sheet: Math.max(1, int(b.tablets_per_sheet) || 1),
-    tablet_price: b.tablet_price !== undefined && b.tablet_price !== null && String(b.tablet_price) !== '' && int(b.tablet_price) > 0 ? int(b.tablet_price) : null,
+    tablet_price: b.tablet_price !== undefined && b.tablet_price !== null && String(b.tablet_price) !== '' && int(b.tablet_price) > 0 ? roundNote(int(b.tablet_price)) : null,
   });
   // Sheet/tablet prices, reorder level and usual supplier belong to the branch, not the shared catalogue.
   const saveBranchFields = (productId: number, branchId: number, f: ReturnType<typeof productFields>) => {
@@ -330,8 +331,8 @@ export function createRouter() {
   r.put('/batches/:id', need('products'), wrap((req) => {
     const before = db().prepare('SELECT * FROM batches WHERE id = ? AND branch_id = ?').get(req.params.id, branchOf(req)) as any;
     if (!before) throw new BizError('Batch not found.', 'NOT_FOUND', 404);
-    const sp = int(req.body.selling_price);
-    if (sp < 0) throw new BizError('Price cannot be negative.');
+    if (int(req.body.selling_price) < 0) throw new BizError('Price cannot be negative.');
+    const sp = roundNote(int(req.body.selling_price)); // payable in notes: nearest 250 IQD
     db().prepare('UPDATE batches SET selling_price = ? WHERE id = ?').run(sp, before.id);
     audit(db(), actor(req), 'products', 'PRICE_CHANGE', { batch: before.id, before: before.selling_price, after: sp });
     return { ok: true };

@@ -7,6 +7,13 @@
 
 export const NOTE_STEP = 250;
 
+/** Round a price to an amount that can be paid in Iraqi notes (250, 500, 1,000 …): nearest 250, halves up, at least 250. */
+export const roundNote = (x: number): number => {
+  const n = Number(x);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.max(NOTE_STEP, Math.floor((n + NOTE_STEP / 2) / NOTE_STEP) * NOTE_STEP);
+};
+
 /** Roles whose discount ceiling the admin sets on the Settings page. Any other non-admin role gets 0. */
 export const DISCOUNT_ROLES = ['cashier', 'pharmacist'] as const;
 export type DiscountRole = (typeof DISCOUNT_ROLES)[number];

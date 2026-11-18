@@ -48,6 +48,21 @@ export function openDatabase(file: string): DB {
       db.prepare("INSERT INTO settings (key, value) VALUES ('migr_product_branch', '1')").run();
     }
   })();
+  // One-time: make every stored price payable in Iraqi notes (nearest 250 IQD, halves up, at least 250).
+  if (!db.prepare("SELECT value FROM settings WHERE key = 'migr_round_250'").get()) {
+    const r = (c: string) => `CASE WHEN ${c} > 0 AND ${c} % 250 <> 0 THEN MAX(250, ((${c} + 125) / 250) * 250) ELSE ${c} END`;
+    db.transaction(() => {
+      const before = db.prepare("SELECT id, branch_id, selling_price FROM batches WHERE selling_price > 0 AND selling_price % 250 <> 0").all();
+      const pb = db.prepare("SELECT product_id, branch_id, sheet_price, tablet_price FROM product_branch WHERE (sheet_price > 0 AND sheet_price % 250 <> 0) OR (tablet_price > 0 AND tablet_price % 250 <> 0)").all();
+      db.exec(`UPDATE batches SET selling_price = ${r('selling_price')};
+        UPDATE product_branch SET sheet_price = ${r('sheet_price')}, tablet_price = ${r('tablet_price')};
+        UPDATE products SET sheet_price = ${r('sheet_price')}, tablet_price = ${r('tablet_price')};`);
+      db.prepare("INSERT INTO settings (key, value) VALUES ('migr_round_250', '1')").run();
+      if (before.length || pb.length)
+        db.prepare("INSERT INTO audit_logs (ts, user_id, role, module, action_code, details_json) VALUES (?, NULL, 'system', 'products', 'PRICES_ROUNDED_250', ?)")
+          .run(new Date().toISOString(), JSON.stringify({ batches: before, sheet_tablet: pb }));
+    })();
+  }
   return db;
 }
 

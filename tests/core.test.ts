@@ -23,13 +23,13 @@ core.openShift(db, actor, 10000);
 test('FEFO takes the earliest-expiring batch first and spans batches', () => {
   const p = prod('Fefo');
   const late = batch(p, 'LATE', day(300), 10, 100, 250);
-  const early = batch(p, 'EARLY', day(60), 3, 80, 200);
+  const early = batch(p, 'EARLY', day(60), 3, 80, 500);
   const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 5 }], payment_method: 'cash', cash_received: 2000 });
   assert.equal(qty(early), 0); assert.equal(qty(late), 8);
   const inv = core.getInvoice(db, r.id);
   assert.equal(inv.items.length, 2);
-  assert.equal(inv.grand_total, 3 * 200 + 2 * 250);
-  assert.equal(inv.change_amount, 2000 - 1100);
+  assert.equal(inv.grand_total, 3 * 500 + 2 * 250);
+  assert.equal(inv.change_amount, 0);
   assert.equal(inv.items.find((i: any) => i.batch_number === 'EARLY').purchase_price, 80); // stored for COGS
 });
 
@@ -101,18 +101,18 @@ test('sell by pack or by sheet: opens a pack, tracks loose sheets, no oversellin
 test('pack / sheet / tablet: 1 pack = 3 sheets x 10 tablets', () => {
   const p = prod('Tabs');
   db.prepare('UPDATE products SET sheets_per_pack = 3, tablets_per_sheet = 10 WHERE id = ?').run(p);
-  const b = batch(p, 'T1', day(200), 2, 6000, 9000); // 2 packs = 60 tablets; sheet 3000, tablet 300
+  const b = batch(p, 'T1', day(200), 2, 6000, 7500); // 2 packs = 60 tablets; sheet 2500, tablet 250
   const loose = () => (db.prepare('SELECT loose_units l FROM batches WHERE id=?').get(b) as any).l;
   // 4 tablets: opens one pack -> 1 pack + 26 loose tablets
-  const r1 = core.checkout(db, actor, { items: [{ product_id: p, quantity: 4, unit: 'tablet' }], payment_method: 'cash', cash_received: 1200 });
+  const r1 = core.checkout(db, actor, { items: [{ product_id: p, quantity: 4, unit: 'tablet' }], payment_method: 'cash', cash_received: 1000 });
   const i1 = core.getInvoice(db, r1.id);
-  assert.equal(i1.grand_total, 4 * 300); assert.equal(qty(b), 1); assert.equal(loose(), 26);
+  assert.equal(i1.grand_total, 4 * 250); assert.equal(qty(b), 1); assert.equal(loose(), 26);
   assert.equal(i1.items[0].purchase_price, 200); // tablet cost = 6000 / 30
   // 1 sheet (10 tablets) from the loose ones
-  const r2 = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit: 'sheet' }], payment_method: 'cash', cash_received: 3000 });
-  assert.equal(core.getInvoice(db, r2.id).grand_total, 3000); assert.equal(qty(b), 1); assert.equal(loose(), 16);
+  const r2 = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit: 'sheet' }], payment_method: 'cash', cash_received: 2500 });
+  assert.equal(core.getInvoice(db, r2.id).grand_total, 2500); assert.equal(qty(b), 1); assert.equal(loose(), 16);
   // last whole pack still sellable as a pack
-  core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit: 'pack' }], payment_method: 'cash', cash_received: 9000 });
+  core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit: 'pack' }], payment_method: 'cash', cash_received: 7500 });
   assert.equal(qty(b), 0); assert.equal(loose(), 16);
   // no whole pack left; 2 sheets need 20 tablets but only 16 remain
   assert.throws(() => core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit: 'pack' }], payment_method: 'cash', cash_received: 99999 }));
@@ -347,6 +347,26 @@ test('upgrade: existing data is kept for the first branch (Novera)', () => {
   const pb = again.prepare('SELECT * FROM product_branch').get() as any;
   assert.equal(pb.branch_id, 1); assert.equal(pb.sheet_price, 1250); assert.equal(pb.reorder_level, 7);
   again.close();
+});
+
+test('every price is payable in notes: auto sheet/tablet prices and stored prices round to 250', () => {
+  const p = prod('Round'); db.prepare('UPDATE products SET sheets_per_pack = 2, tablets_per_sheet = 10 WHERE id = ?').run(p);
+  batch(p, 'R1', day(200), 5, 1000, 3250); // 3,250 / 2 sheets = 1,625 -> 1,750; / 20 tablets = 162.5 -> 250
+  const r = core.checkout(db, actor, { items: [{ product_id: p, quantity: 1, unit: 'sheet' }, { product_id: p, quantity: 1, unit: 'tablet' }], payment_method: 'cash', cash_received: 2000 });
+  const inv = core.getInvoice(db, r.id);
+  assert.deepEqual(inv.items.map((i: any) => i.unit_price).sort((a: number, b: number) => a - b), [250, 1750]);
+  assert.equal(inv.grand_total % 250, 0);
+  // Upgrade: odd stored prices are rounded once (nearest 250, halves up, at least 250).
+  const file = `/tmp/pharm-round-${Date.now()}.db`;
+  const a = openDatabase(file);
+  const q = Number(a.prepare("INSERT INTO products (brand_name) VALUES ('Odd')").run().lastInsertRowid);
+  a.prepare("INSERT INTO batches (product_id,branch_id,batch_number,expiry_date,quantity,purchase_price,selling_price) VALUES (?,1,'a','2030-01-01',1,1,375),(?,1,'b','2030-01-01',1,1,5230),(?,1,'c','2030-01-01',1,1,100)").run(q, q, q);
+  a.prepare("INSERT INTO product_branch (product_id, branch_id, sheet_price) VALUES (?, 1, 1625)").run(q);
+  a.prepare("DELETE FROM settings WHERE key='migr_round_250'").run(); a.close();
+  const b2 = openDatabase(file);
+  assert.deepEqual((b2.prepare('SELECT selling_price s FROM batches ORDER BY batch_number').all() as any[]).map((x) => x.s), [500, 5250, 250]);
+  assert.equal((b2.prepare('SELECT sheet_price s FROM product_branch WHERE product_id = ?').get(q) as any).s, 1750);
+  b2.close();
 });
 
 test('audit log is append-only', () => {

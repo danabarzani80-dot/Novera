@@ -8,7 +8,7 @@ import { api, qs } from '../../lib/api';
 import { iqd, parseNum, stockText } from '../../lib/format';
 import type { CartLine, Product } from '../../types/pharmacy';
 import { Badge, Empty, Modal, Skeleton, useAction, useDebounced, useLoad, useToast } from '../common/ui';
-import { NOTE_STEP, checkDiscount, discountCap } from '../../lib/discount';
+import { NOTE_STEP, roundNote, checkDiscount, discountCap } from '../../lib/discount';
 import { ThermalReceiptModal } from '../common/ThermalReceiptModal';
 import { ShiftDialog } from '../common/Shell';
 import { AlternativeMedicineModal } from './AlternativeMedicineModal';
@@ -60,9 +60,10 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
   const tpsOf = (p: Product) => Math.max(1, p.tablets_per_sheet ?? 1);
   const unitsOf = (p: Product): U[] => ['pack', ...(sppOf(p) > 1 ? ['sheet' as U] : []), ...(tpsOf(p) > 1 ? ['tablet' as U] : [])];
   const sizeOf = (p: Product, u: U) => (u === 'pack' ? sppOf(p) * tpsOf(p) : u === 'sheet' ? tpsOf(p) : 1);
-  const priceOf = (p: Product, u: U) => (u === 'pack' ? (p.price ?? 0)
-    : u === 'sheet' ? (p.sheet_price ?? Math.round((p.price ?? 0) / sppOf(p)))
-    : (p.tablet_price ?? Math.round((p.price ?? 0) / (sppOf(p) * tpsOf(p)))));
+  // Same rule as the server: every price is payable in notes (rounded to 250 IQD).
+  const priceOf = (p: Product, u: U) => roundNote(u === 'pack' ? (p.price ?? 0)
+    : u === 'sheet' ? (p.sheet_price ?? (p.price ?? 0) / sppOf(p))
+    : (p.tablet_price ?? (p.price ?? 0) / (sppOf(p) * tpsOf(p))));
   const availOf = (p: Product, u: U) => (u === 'pack' ? (p.stock ?? 0)
     : Math.floor(((p.stock ?? 0) * sppOf(p) * tpsOf(p) + (p.loose ?? 0)) / sizeOf(p, u)));
 
@@ -210,7 +211,7 @@ export default function POSScreen({ onSold }: { onSold: () => void }) {
       const found = await api.get(`/products?${qs({ q: it.brand_name, size: 20 })}`);
       const p: Product | undefined = found.rows.find((x: Product) => x.id === it.product_id);
       if (!p || (p.stock ?? 0) <= 0) { toast(`${it.brand_name}: ${t('out_of_stock')}`, 'error'); continue; }
-      lines.push({ key: `${p.id}:pack`, unit: 'pack', product_id: p.id, name: p.brand_name, dosage: p.dosage, unit_price: p.price ?? 0, list_price: p.price ?? 0, quantity: Math.min(it.quantity, p.stock ?? 0), max: p.stock ?? 0 });
+      lines.push({ key: `${p.id}:pack`, unit: 'pack', product_id: p.id, name: p.brand_name, dosage: p.dosage, unit_price: roundNote(p.price ?? 0), list_price: roundNote(p.price ?? 0), quantity: Math.min(it.quantity, p.stock ?? 0), max: p.stock ?? 0 });
     }
     patch({ lines, prescriptionId: id });
     setShowRx(false);
