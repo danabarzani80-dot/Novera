@@ -11,7 +11,7 @@ import { Modal, useAction } from './ui';
 import { iqd, parseNum } from '../../lib/format';
 
 const ROLE_KEY: Record<string, string> = {
-  super_admin: 'role_super_admin', pharmacist: 'role_pharmacist', cashier: 'role_cashier', warehouse_manager: 'role_warehouse_manager', doctor: 'role_doctor',
+  super_admin: 'role_super_admin', pharmacist: 'role_pharmacist', cashier: 'role_cashier', warehouse_manager: 'role_warehouse_manager', doctor: 'role_doctor', accountant: 'role_accountant',
 };
 
 const MENU: { section: string; items: { id: Module; label: string; icon: any; color?: string; badge?: boolean }[] }[] = [
