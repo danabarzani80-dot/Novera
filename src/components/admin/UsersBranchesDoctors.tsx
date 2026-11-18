@@ -5,7 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { api, ApiError } from '../../lib/api';
 import { Badge, Confirm, Field, Modal, PageTitle, Skeleton, useAction, useLoad, useToast } from '../common/ui';
 
-const ROLES = ['super_admin', 'pharmacist', 'cashier', 'warehouse_manager', 'doctor'];
+const ROLES = ['super_admin', 'pharmacist', 'cashier', 'warehouse_manager', 'doctor', 'accountant'];
 
 export default function UsersBranchesDoctors({ mode }: { mode: 'users' | 'branches' }) {
   return mode === 'branches' ? <Branches /> : <Users />;
