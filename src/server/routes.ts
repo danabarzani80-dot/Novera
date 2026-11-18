@@ -1,4 +1,4 @@
-import express, { type NextFunction, type Request, type Response } from 'express';
+        import express, { type NextFunction, type Request, type Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import fs from 'node:fs';
@@ -16,7 +16,7 @@ declare module 'express-serve-static-core' {
   interface Request { user?: SessionUser }
 }
 
-const ROLES: Role[] = ['super_admin', 'pharmacist', 'cashier', 'warehouse_manager', 'doctor'];
+const ROLES: Role[] = ['super_admin', 'pharmacist', 'cashier', 'warehouse_manager', 'doctor', 'accountant'];
 
 function secret(): string {
   if (process.env.PHARMACY_SECRET) return process.env.PHARMACY_SECRET;
@@ -37,6 +37,8 @@ const int = (v: unknown) => Math.round(Number(v) || 0);
 const actor = (req: Request) => ({ id: req.user!.id, role: req.user!.role, branch_id: req.user!.branch_id });
 const branchOf = (req: Request) => req.user!.branch_id;
 const isAdmin = (req: Request) => req.user!.role === 'super_admin';
+/** Admin and accountant may move between branches; the accountant only to read Accounting. */
+const canSwitchBranch = (req: Request) => isAdmin(req) || req.user!.role === 'accountant';
 
 /** Name printed on receipts and shown in the header. With one branch it is the pharmacy name from
  *  Settings; with several branches (each run as its own pharmacy) it is that branch's name. */
@@ -111,9 +113,9 @@ export function createRouter() {
   r.post('/auth/logout', wrap((_req, res) => { res.clearCookie('token'); return { ok: true }; }));
 
   r.use(needAuth);
-  // Cashiers and doctors never receive cost prices (the basis of cost of goods sold and profit).
+  // Cashiers, doctors and the accountant never receive cost prices (the basis of cost of goods sold and profit).
   r.use((req, res, next) => {
-    if (req.user!.role !== 'cashier' && req.user!.role !== 'doctor') return next();
+    if (!['cashier', 'doctor', 'accountant'].includes(req.user!.role)) return next();
     const strip = (v: any): any => Array.isArray(v) ? v.map(strip)
       : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([k]) => !['cost', 'purchase_price', 'cost_price', 'total_cost'].includes(k)).map(([k, x]) => [k, strip(x)])) : v;
     const json = res.json.bind(res);
@@ -125,12 +127,12 @@ export function createRouter() {
     const name = (db().prepare("SELECT value FROM settings WHERE key='pharmacy_name'").get() as any)?.value ?? '';
     const shift = core.activeShift(db(), req.user!.id) ?? null;
     const branch = db().prepare('SELECT id, name, flexible_prices FROM branches WHERE id = ?').get(branchOf(req)) as any;
-    const branches = isAdmin(req) ? db().prepare('SELECT id, name FROM branches ORDER BY id').all() : [];
+    const branches = canSwitchBranch(req) ? db().prepare('SELECT id, name FROM branches ORDER BY id').all() : [];
     return { user: req.user, pharmacyName: displayName(branchOf(req)), settingsPharmacyName: name, branch, branches, shift };
   }));
   // The admin works in one branch at a time and can switch between them (not while a shift is open).
   r.put('/auth/branch', wrap((req) => {
-    if (!isAdmin(req)) throw new BizError('Only the admin can switch branches.', 'FORBIDDEN', 403);
+    if (!canSwitchBranch(req)) throw new BizError('Only the admin can switch branches.', 'FORBIDDEN', 403);
     const id = int(req.body?.branch_id);
     if (!db().prepare('SELECT 1 FROM branches WHERE id = ?').get(id)) throw new BizError('Branch not found.', 'NOT_FOUND', 404);
     if (core.activeShift(db(), req.user!.id)) throw new BizError('Close your shift before switching branch.');
@@ -593,7 +595,9 @@ export function createRouter() {
 
   // ─────────── Accounting ───────────
   r.get('/pnl', need('accounting'), wrap((req) => {
-    if (!isAdmin(req)) throw new BizError('Only the admin can see profit reports.', 'FORBIDDEN', 403);
+    // The accountant sees sales totals, daily payments and expenses, but never cost of goods or profit.
+    const accountant = req.user!.role === 'accountant';
+    if (!isAdmin(req) && !accountant) throw new BizError('Only the admin can see profit reports.', 'FORBIDDEN', 403);
     const from = String(req.query.from || todayStr(new Date(Date.now() - 29 * 86400_000)));
     const to = String(req.query.to || todayStr());
     const total = core.profitAndLoss(db(), from, to, branchOf(req));
@@ -602,13 +606,22 @@ export function createRouter() {
     for (let d = new Date(start); d <= end && series.length < 400; d.setDate(d.getDate() + 1)) {
       const day = todayStr(d);
       const p = core.profitAndLoss(db(), day, day, branchOf(req));
-      series.push({ date: day, revenue: p.net_revenue, profit: p.net_profit });
+      const pay = db().prepare(`SELECT COALESCE(SUM(cash_amount),0) cash, COALESCE(SUM(card_amount),0) card, COALESCE(SUM(qarz_amount),0) qarz
+        FROM invoices WHERE status='completed' AND branch_id = ? AND created_at BETWEEN ? AND ?`)
+        .get(branchOf(req), new Date(day + 'T00:00:00').toISOString(), new Date(day + 'T23:59:59.999').toISOString()) as any;
+      series.push({ date: day, revenue: p.net_revenue, receipts: p.receipts, returns: p.returns, cash: pay.cash, card: pay.card, qarz: pay.qarz,
+        ...(accountant ? {} : { profit: p.net_profit }) });
+    }
+    if (accountant) {
+      const { cogs, gross_profit, shrinkage, net_profit, ...totals } = total;
+      return { ...totals, series, limited: true };
     }
     return { ...total, series };
   }));
   r.get('/expenses', need('accounting'), wrap((req) => db().prepare('SELECT * FROM expenses WHERE branch_id = ? AND date BETWEEN ? AND ? ORDER BY date DESC, id DESC')
     .all(branchOf(req), String(req.query.from || '0000-01-01'), String(req.query.to || '9999-12-31'))));
   r.post('/expenses', need('accounting'), wrap((req) => {
+    if (req.user!.role === 'accountant') throw new BizError('The accountant can view expenses but not add them.', 'FORBIDDEN', 403);
     const amount = int(req.body.amount);
     if (amount <= 0) throw new BizError('Amount must be greater than zero.');
     if (!['rent', 'salaries', 'utilities', 'other'].includes(req.body.category)) throw new BizError('Choose a category.');
