@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { BarChart3, Coins, Plus, Receipt, TrendingUp, Wallet } from 'lucide-react';
+import { BarChart3, Coins, Plus, Receipt, RotateCcw, TrendingUp, Wallet } from 'lucide-react';
+import { useAuth } from '../../lib/auth';
 import { useI18n } from '../../i18n/I18nContext';
 import { api, qs } from '../../lib/api';
 import { iqd, localDate, parseNum } from '../../lib/format';
@@ -9,6 +10,9 @@ import { Badge, Empty, Field, Modal, PageTitle, Skeleton, StatCard, useAction, u
 export default function PnLReport() {
   const { t } = useI18n();
   const { run, busy } = useAction();
+  const { user } = useAuth();
+  // Accountant: view-only, sales totals and daily payments, no cost of goods or profit.
+  const limited = user?.role === 'accountant';
   const [from, setFrom] = useState(localDate(new Date(Date.now() - 29 * 86400_000)));
   const [to, setTo] = useState(localDate());
   const { data: d, loading, reload } = useLoad(() => api.get(`/pnl?${qs({ from, to })}`), [from, to]);
@@ -20,35 +24,47 @@ export default function PnLReport() {
     const r = await run(() => api.post('/expenses', { ...e, amount: parseNum(e.amount) }), t('saved'));
     if (r) { setAdding(false); setE({ ...e, amount: '', note: '' }); reload(); exps.reload(); }
   };
-  const rows: [string, number, boolean?][] = d ? [
+  const rows: [string, number, boolean?][] = !d ? [] : limited ? [
+    [t('pnl_revenue'), d.revenue], [`− ${t('pnl_returns')}`, -d.returns], [t('net_revenue'), d.net_revenue, true],
+    ...d.expense_breakdown.map((x: any): [string, number] => [t('exp_' + x.category), x.a]), [t('expenses'), d.expenses, true],
+  ] : [
     [t('pnl_revenue'), d.revenue], [`− ${t('pnl_returns')}`, -d.returns], [t('net_revenue'), d.net_revenue, true], [`− ${t('cogs')}`, -d.cogs],
     [t('gross_profit'), d.gross_profit, true], [`− ${t('shrinkage')}`, -d.shrinkage],
     ...d.expense_breakdown.map((x: any): [string, number] => [`− ${t('exp_' + x.category)}`, -x.a]), [t('net_profit'), d.net_profit, true],
-  ] : [];
+  ];
 
   return (
     <div className="max-w-6xl mx-auto">
       <PageTitle icon={<BarChart3 className="text-blue-600" />} title={t('pnl_title')} subtitle={t('pnl_sub')}
         right={<><Badge tone="green">{t('active_review')}</Badge><input type="date" className="input !w-auto" value={from} onChange={(x) => setFrom(x.target.value)} />
           <input type="date" className="input !w-auto" value={to} onChange={(x) => setTo(x.target.value)} />
-          <button className="btn-primary" onClick={() => setAdding(true)}><Plus size={16} />{t('add_expense')}</button></>} />
+          {!limited && <button className="btn-primary" onClick={() => setAdding(true)}><Plus size={16} />{t('add_expense')}</button>}</>} />
       {loading || !d ? <Skeleton rows={6} /> : (
         <>
+          {limited ? (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+            <StatCard title={t('net_revenue')} value={iqd(d.net_revenue)} icon={<TrendingUp />} tone="blue" />
+            <StatCard title={t('pnl_returns')} value={iqd(d.returns)} icon={<RotateCcw />} tone="orange" />
+            <StatCard title={t('expenses')} value={iqd(d.expenses)} icon={<Wallet />} tone="red" />
+            <StatCard title={t('receipts')} value={String(d.receipts)} icon={<Receipt />} tone="green" />
+          </div>
+          ) : (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
             <StatCard title={t('net_revenue')} value={iqd(d.net_revenue)} icon={<TrendingUp />} tone="blue" />
             <StatCard title={t('cogs')} value={iqd(d.cogs)} icon={<Receipt />} tone="orange" />
             <StatCard title={t('gross_profit')} value={iqd(d.gross_profit)} icon={<Coins />} tone="green" />
             <StatCard title={t('net_profit')} value={iqd(d.net_profit)} icon={<Wallet />} tone={d.net_profit >= 0 ? 'purple' : 'red'} valueClass={d.net_profit < 0 ? 'text-red-600' : ''} />
           </div>
+          )}
           <div className="grid lg:grid-cols-[1fr_380px] gap-4">
             <div className="card">
-              <div className="card-title mb-3">{t('revenue_vs_profit')}</div>
+              <div className="card-title mb-3">{limited ? t('net_revenue') : t('revenue_vs_profit')}</div>
               <div style={{ height: 280 }} dir="ltr">
                 <ResponsiveContainer><AreaChart data={d.series}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" /><XAxis dataKey="date" tick={{ fontSize: 10 }} tickFormatter={(v) => v.slice(5)} /><YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : v)} />
                   <Tooltip formatter={(v: any) => iqd(Number(v))} /><Legend />
                   <Area type="monotone" dataKey="revenue" name={t('net_revenue')} stroke="#2563eb" fill="#2563eb33" />
-                  <Area type="monotone" dataKey="profit" name={t('net_profit')} stroke="#059669" fill="#05966933" /></AreaChart></ResponsiveContainer>
+                  {!limited && <Area type="monotone" dataKey="profit" name={t('net_profit')} stroke="#059669" fill="#05966933" />}</AreaChart></ResponsiveContainer>
               </div>
             </div>
             <div className="card !p-0">
@@ -56,6 +72,14 @@ export default function PnLReport() {
               <table className="w-full"><tbody>{rows.map(([k, v, strong], i) => (
                 <tr key={i} className={strong ? 'bg-slate-50' : ''}><td className={`td ${strong ? 'font-extrabold' : ''}`}>{k}</td><td className={`td text-end ${strong ? 'font-extrabold' : ''} ${v < 0 ? 'text-red-600' : ''}`}>{iqd(v)}</td></tr>))}</tbody></table>
             </div>
+          </div>
+          <div className="card !p-0 mt-4 overflow-x-auto">
+            <div className="p-4 card-title">{t('daily_payments')}</div>
+            <table className="w-full"><thead><tr><th className="th">{t('date')}</th><th className="th text-end">{t('receipts')}</th><th className="th text-end">{t('pay_cash')}</th>
+              <th className="th text-end">{t('pay_card')}</th><th className="th text-end">{t('pay_qarz')}</th><th className="th text-end">{t('pnl_returns')}</th><th className="th text-end">{t('net_revenue')}</th></tr></thead>
+              <tbody>{[...d.series].reverse().filter((x: any) => x.receipts || x.returns).map((x: any) => <tr key={x.date}><td className="td">{x.date}</td><td className="td text-end">{x.receipts}</td>
+                <td className="td text-end">{iqd(x.cash)}</td><td className="td text-end">{iqd(x.card)}</td><td className="td text-end">{iqd(x.qarz)}</td>
+                <td className="td text-end text-red-600">{iqd(x.returns)}</td><td className="td text-end font-bold">{iqd(x.revenue)}</td></tr>)}</tbody></table>
           </div>
           <div className="card !p-0 mt-4 overflow-x-auto">
             <div className="p-4 card-title">{t('expenses')}</div>

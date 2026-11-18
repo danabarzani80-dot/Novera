@@ -53,6 +53,8 @@ export const dictionary: Record<string, T> = {
   role_cashier: ['Cashier', 'قاسە', 'كاشير'],
   role_warehouse_manager: ['Warehouse Manager', 'بەڕێوەبەری کۆگا', 'مدير المستودع'],
   role_doctor: ['Doctor', 'دکتۆر', 'طبيب'],
+  role_accountant: ['Accountant', 'ژمێریار', 'محاسب'],
+  daily_payments: ['Daily payments', 'پارەدانی ڕۆژانە', 'المدفوعات اليومية'],
 
   // ── Common ──
   cancel: ['Cancel', 'پاشگەزبوونەوە', 'إلغاء'],

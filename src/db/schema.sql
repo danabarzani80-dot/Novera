@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS branches (
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, username TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('super_admin','pharmacist','cashier','warehouse_manager','doctor')),
+  role TEXT NOT NULL CHECK (role IN ('super_admin','pharmacist','cashier','warehouse_manager','doctor','accountant')),
   branch_id INTEGER REFERENCES branches(id), specialty TEXT, lang TEXT DEFAULT 'en',
   active INTEGER NOT NULL DEFAULT 1
 );

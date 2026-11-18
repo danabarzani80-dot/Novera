@@ -30,6 +30,26 @@ export function openDatabase(file: string): DB {
   addCol('invoice_items', 'sale_unit', "TEXT NOT NULL DEFAULT 'pack'");
   addCol('invoice_items', 'unit_size', 'INTEGER NOT NULL DEFAULT 1'); // smallest units in one sold unit
   addCol('invoice_items', 'pack_size', 'INTEGER NOT NULL DEFAULT 1'); // smallest units in one pack
+  // Allow the 'accountant' role on databases created before it existed (SQLite cannot alter a CHECK,
+  // so the users table is rebuilt once; no other table references users by foreign key).
+  const usersSql = (db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").get() as { sql: string } | undefined)?.sql ?? '';
+  if (usersSql && !usersSql.includes("'accountant'")) {
+    db.pragma('foreign_keys = OFF');
+    db.transaction(() => {
+      db.exec(`CREATE TABLE users_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('super_admin','pharmacist','cashier','warehouse_manager','doctor','accountant')),
+        branch_id INTEGER REFERENCES branches(id), specialty TEXT, lang TEXT DEFAULT 'en',
+        active INTEGER NOT NULL DEFAULT 1
+      );
+      INSERT INTO users_new (id, name, username, password_hash, role, branch_id, specialty, lang, active)
+        SELECT id, name, username, password_hash, role, branch_id, specialty, lang, active FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_new RENAME TO users;`);
+    })();
+    db.pragma('foreign_keys = ON');
+  }
   const hasBranch = db.prepare('SELECT COUNT(*) c FROM branches').get() as { c: number };
   if (hasBranch.c === 0) db.prepare("INSERT INTO branches (name) VALUES ('Main Branch')").run();
   // Branch separation: each branch is run as its own pharmacy. Everything that existed before

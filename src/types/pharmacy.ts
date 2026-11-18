@@ -1,4 +1,4 @@
-export type Role = 'super_admin' | 'pharmacist' | 'cashier' | 'warehouse_manager' | 'doctor';
+export type Role = 'super_admin' | 'pharmacist' | 'cashier' | 'warehouse_manager' | 'doctor' | 'accountant';
 export type Lang = 'en' | 'ku' | 'ar';
 
 export type Module =
@@ -20,6 +20,8 @@ export const ROLE_MODULES: Record<Role, Module[]> = {
   cashier: ['dashboard', 'pos', 'returns', 'customers', 'shifts'],
   warehouse_manager: ['dashboard', 'products', 'barcode', 'adjust', 'expiry', 'receive', 'rtv', 'supplier'],
   doctor: ['doctor'],
+  // Accountant: Accounting only, view-only, totals without cost or profit; can switch between branches.
+  accountant: ['accounting'],
 };
 
 export const can = (role: Role, m: Module) => ROLE_MODULES[role]?.includes(m) ?? false;
