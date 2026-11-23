@@ -16,8 +16,14 @@ export default function SalesReturns() {
   const [inv, setInv] = useState<any>(null);
   const [qty, setQty] = useState<Record<number, number>>({});
   const [method, setMethod] = useState<'cash' | 'card' | 'qarz'>('cash');
+  const [hit, setHit] = useState<number[]>([]); // medicines matched by the search, highlighted in the invoice
 
-  const open = async (id: number) => { setInv(await api.get(`/invoices/${id}`)); setQty({}); setMethod('cash'); };
+  const open = async (id: number, matched: number[] = []) => { setInv(await api.get(`/invoices/${id}`)); setQty({}); setMethod('cash'); setHit(matched); };
+  // Scanning a barcode opens the latest invoice that sold that medicine straight away.
+  useEffect(() => {
+    const first = list.data?.[0];
+    if (/^[0-9\u0660-\u0669\u06F0-\u06F9]{6,}$/.test(dq.trim()) && first?.matched_ids?.length) open(first.id, first.matched_ids);
+  }, [list.data]);
   useEffect(() => { if (inv?.customer_id && inv.payment_method === 'qarz') setMethod('qarz'); }, [inv]);
 
   // Returns are allowed only within 2 days (48 hours) of the sale; the server enforces the same rule.
@@ -46,9 +52,10 @@ export default function SalesReturns() {
             {list.loading ? <Skeleton rows={5} /> : (
               <ul className="divide-y divide-slate-100 max-h-[60vh] overflow-y-auto">
                 {(list.data ?? []).map((i: any) => (
-                  <li key={i.id}><button onClick={() => open(i.id)} className={`w-full text-start py-2 px-2 rounded-lg ${inv?.id === i.id ? 'bg-blue-50' : 'hover:bg-slate-50'}`}>
+                  <li key={i.id}><button onClick={() => open(i.id, i.matched_ids)} className={`w-full text-start py-2 px-2 rounded-lg ${inv?.id === i.id ? 'bg-blue-50' : 'hover:bg-slate-50'}`}>
                     <div className="flex justify-between text-sm font-bold"><span>{i.invoice_number}</span><span>{iqd(i.grand_total)}</span></div>
-                    <div className="text-xs text-slate-500">{fmtDateTime(i.created_at)} • {i.customer_name ?? t('walk_in')}</div></button></li>
+                    <div className="text-xs text-slate-500">{fmtDateTime(i.created_at)} • {i.customer_name ?? t('walk_in')}</div>
+                    {i.matched_names && <div className="text-xs font-bold text-amber-700 truncate">{i.matched_names}</div>}</button></li>
                 ))}
               </ul>
             )}
@@ -61,7 +68,7 @@ export default function SalesReturns() {
                 <table className="w-full"><thead><tr><th className="th">{t('medicine')}</th><th className="th">{t('batch')}</th><th className="th">{t('price')}</th><th className="th">{t('sold')}</th><th className="th">{t('returned')}</th><th className="th w-28">{t('return_qty')}</th></tr></thead>
                   <tbody>{inv.items.map((i: any) => {
                     const left = i.quantity - i.returned_qty;
-                    return (<tr key={i.id}><td className="td font-bold">{i.brand_name} {i.dosage}</td><td className="td">{i.batch_number}</td><td className="td">{iqd(i.unit_price)}</td>
+                    return (<tr key={i.id} className={hit.includes(i.product_id) ? 'bg-amber-50' : ''}><td className="td font-bold">{i.brand_name} {i.dosage}</td><td className="td">{i.batch_number}</td><td className="td">{iqd(i.unit_price)}</td>
                       <td className="td">{i.quantity}</td><td className="td">{i.returned_qty}</td>
                       <td className="td"><input type="number" min={0} max={left} disabled={left === 0 || expired} className="input !py-1" value={qty[i.id] ?? ''}
                         onChange={(e) => setQty({ ...qty, [i.id]: Math.max(0, Math.min(left, Number(e.target.value) || 0)) })} /></td></tr>);
