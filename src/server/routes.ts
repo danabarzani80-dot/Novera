@@ -68,6 +68,9 @@ const need = (...mods: Module[]) => (req: Request, _res: Response, next: NextFun
   mods.some((m) => can(req.user!.role, m)) ? next() : next(new BizError('You do not have permission for this action.', 'FORBIDDEN', 403));
 
 export function createRouter() {
+  // Scanners on a Kurdish/Arabic keyboard send Arabic-Indic digits (٠-٩ / ۰-۹); treat them as 0-9 and drop spaces.
+  const normCode = (v: unknown) => String(v ?? '').replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[\u06F0-\u06F9]/g, (d) => String(d.charCodeAt(0) - 0x06F0)).trim();
   const r = express.Router();
   const db = () => getDb();
 
@@ -224,7 +227,7 @@ export function createRouter() {
         ORDER BY expiry_date, id LIMIT 1)`;
 
   r.get('/products', wrap((req) => {
-    const q = `%${String(req.query.q ?? '').trim()}%`;
+    const q = `%${normCode(req.query.q)}%`;
     const cat = String(req.query.category ?? '');
     const page = Math.max(1, int(req.query.page) || 1);
     const size = Math.min(1000, Math.max(1, int(req.query.size) || 25));
@@ -238,7 +241,8 @@ export function createRouter() {
   }));
 
   r.get('/products/by-barcode/:code', wrap((req) => {
-    const row = db().prepare(`${productSelect} WHERE p.active = 1 AND p.barcode = @code`).get({ today: todayStr(), branch: req.user!.branch_id, code: req.params.code });
+    const code = normCode(req.params.code).replace(/\s+/g, '');
+    const row = db().prepare(`${productSelect} WHERE p.active = 1 AND REPLACE(TRIM(p.barcode),' ','') = @code`).get({ today: todayStr(), branch: req.user!.branch_id, code });
     if (!row) throw new BizError('No medicine with this barcode.', 'NOT_FOUND', 404);
     return row;
   }));
@@ -340,11 +344,13 @@ export function createRouter() {
     return { ok: true };
   }));
   r.get('/batches', need('pos', 'products', 'adjust', 'expiry', 'receive', 'rtv', 'transfers', 'supplier'), wrap((req) => {
-    const q = `%${String(req.query.q ?? '').trim()}%`;
+    const q = `%${normCode(req.query.q)}%`;
     const supplier = int(req.query.supplier_id);
-    const rows = db().prepare(`SELECT b.*, p.brand_name, p.dosage, p.generic_name FROM batches b JOIN products p ON p.id = b.product_id
+    // all=1 (stock counts): also list batches at 0 or with only loose sheets/tablets, so a wrong 0 can be corrected.
+    const stockFilter = String(req.query.all ?? '') === '1' ? '' : 'AND b.quantity > 0';
+    const rows = db().prepare(`SELECT b.*, p.brand_name, p.dosage, p.generic_name, p.sheets_per_pack, p.tablets_per_sheet FROM batches b JOIN products p ON p.id = b.product_id
       LEFT JOIN product_branch pb ON pb.product_id = p.id AND pb.branch_id = b.branch_id
-      WHERE b.branch_id = ? AND b.quantity > 0 AND (p.brand_name LIKE ? OR b.batch_number LIKE ? OR p.barcode LIKE ?)
+      WHERE b.branch_id = ? ${stockFilter} AND (p.brand_name LIKE ? OR b.batch_number LIKE ? OR p.barcode LIKE ?)
       ${supplier ? 'AND pb.supplier_id = ' + supplier : ''} ORDER BY p.brand_name, b.expiry_date LIMIT 100`).all(req.user!.branch_id, q, q, q) as any[];
     return rows.map((b) => ({ ...b, days_left: daysLeft(b.expiry_date) }));
   }));
@@ -358,11 +364,17 @@ export function createRouter() {
   // ─────────── POS ───────────
   r.post('/checkout', need('pos'), wrap((req) => core.checkout(db(), actor(req), req.body)));
   r.get('/invoices', need('pos', 'returns', 'shifts', 'dashboard'), wrap((req) => {
-    const q = `%${String(req.query.q ?? '').trim()}%`;
-    return db().prepare(`SELECT DISTINCT i.id, i.invoice_number, i.created_at, i.grand_total, i.payment_method, c.name customer_name, u.name cashier
+    const raw = normCode(req.query.q);
+    const q = `%${raw}%`;
+    // A scanned barcode (exact match) or a medicine name finds every invoice that sold it; matched_* tell the screen which line.
+    const rows = db().prepare(`SELECT i.id, i.invoice_number, i.created_at, i.grand_total, i.payment_method, c.name customer_name, u.name cashier,
+        GROUP_CONCAT(DISTINCT CASE WHEN ? <> '' AND (p.barcode = ? OR p.brand_name LIKE ?) THEN p.brand_name END) matched_names,
+        GROUP_CONCAT(DISTINCT CASE WHEN ? <> '' AND (p.barcode = ? OR p.brand_name LIKE ?) THEN p.id END) matched_ids
       FROM invoices i JOIN users u ON u.id = i.user_id LEFT JOIN customers c ON c.id = i.customer_id
       LEFT JOIN invoice_items ii ON ii.invoice_id = i.id LEFT JOIN products p ON p.id = ii.product_id
-      WHERE i.branch_id = ? AND (i.invoice_number LIKE ? OR p.brand_name LIKE ?) ORDER BY i.id DESC LIMIT 50`).all(req.user!.branch_id, q, q);
+      WHERE i.branch_id = ? AND (i.invoice_number LIKE ? OR p.brand_name LIKE ? OR (? <> '' AND p.barcode = ?))
+      GROUP BY i.id ORDER BY i.id DESC LIMIT 50`).all(raw, raw, q, raw, raw, q, req.user!.branch_id, q, q, raw, raw) as any[];
+    return rows.map((r) => ({ ...r, matched_ids: r.matched_ids ? String(r.matched_ids).split(',').map(Number) : [] }));
   }));
   r.get('/invoices/:id', need('pos', 'returns', 'shifts', 'dashboard'), wrap((req) => {
     const inv = core.getInvoice(db(), int(req.params.id));

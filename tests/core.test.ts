@@ -387,4 +387,26 @@ test('shift close computes expected cash and difference', () => {
   assert.equal(closed!.difference, -500);
 });
 
+test('stock count corrects a batch at 0 and records loose sheets of an opened pack', () => {
+  const f = openDatabase(':memory:');
+  const u = Number(f.prepare("INSERT INTO users (name,username,password_hash,role,branch_id) VALUES ('A','adj','x','cashier',1)").run().lastInsertRowid);
+  const a = { id: u, role: 'cashier', branch_id: 1 };
+  const p = Number(f.prepare("INSERT INTO products (brand_name, sheets_per_pack) VALUES ('Tab', 3)").run().lastInsertRowid);
+  const b = Number(f.prepare("INSERT INTO batches (product_id,branch_id,batch_number,expiry_date,quantity,purchase_price,selling_price) VALUES (?,1,'z',?,0,900,1500)").run(p, day(200)).lastInsertRowid);
+  // 0 in the system, 4 full packs + 1 loose sheet on the shelf.
+  core.adjustStock(f, a, { batch_id: b, counted_qty: 4, counted_loose: 1, reason: 'count_correction' });
+  const row = f.prepare('SELECT quantity, loose_units FROM batches WHERE id = ?').get(b) as any;
+  assert.equal(row.quantity, 4); assert.equal(row.loose_units, 1);
+  // Loose must be less than one pack, and never negative.
+  assert.throws(() => core.adjustStock(f, a, { batch_id: b, counted_qty: 4, counted_loose: 3, reason: 'count_correction' }));
+  assert.throws(() => core.adjustStock(f, a, { batch_id: b, counted_qty: 4, counted_loose: -1, reason: 'count_correction' }));
+  // Not sending counted_loose keeps the current loose sheets (old clients).
+  core.adjustStock(f, a, { batch_id: b, counted_qty: 2, reason: 'count_correction' });
+  assert.equal((f.prepare('SELECT loose_units l FROM batches WHERE id = ?').get(b) as any).l, 1);
+  // Shrinkage values sheets at pack cost / 3: (0 -> 4p+1s) -3900, (4p+1s -> 2p+1s) +1800, (2p+1s -> 2p) +300.
+  core.adjustStock(f, a, { batch_id: b, counted_qty: 2, counted_loose: 0, reason: 'lost' });
+  const pl = core.profitAndLoss(f, day(0), day(0));
+  assert.equal(pl.shrinkage, -3900 + 1800 + 300);
+});
+
 console.log(`\n${passed} tests passed`);

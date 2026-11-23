@@ -445,17 +445,23 @@ export function createRtv(db: DB, actor: Actor, input: { supplier_id: number; re
 }
 
 // ───────────────────────── Stock ─────────────────────────
-export function adjustStock(db: DB, actor: Actor, input: { batch_id: number; counted_qty: number; reason: string }) {
+export function adjustStock(db: DB, actor: Actor, input: { batch_id: number; counted_qty: number; counted_loose?: number; reason: string }) {
   return db.transaction(() => {
-    const b = db.prepare('SELECT * FROM batches WHERE id = ? AND branch_id = ?').get(input.batch_id, actor.branch_id) as any;
+    const b = db.prepare(`SELECT b.*, p.sheets_per_pack, p.tablets_per_sheet FROM batches b JOIN products p ON p.id = b.product_id
+      WHERE b.id = ? AND b.branch_id = ?`).get(input.batch_id, actor.branch_id) as any;
     if (!b) throw new BizError('Batch not found.', 'NOT_FOUND', 404);
     const counted = int(input.counted_qty);
     if (counted < 0) throw new BizError('Counted quantity cannot be negative.');
+    // Opened packs: loose stock in the smallest unit (tablets, or sheets when a sheet is not split).
+    const pack = Math.max(1, int(b.sheets_per_pack) || 1) * Math.max(1, int(b.tablets_per_sheet) || 1);
+    const loose = input.counted_loose === undefined || input.counted_loose === null ? (pack > 1 ? (b.loose_units ?? 0) : 0) : int(input.counted_loose);
+    if (loose < 0) throw new BizError('Loose quantity cannot be negative.');
+    if (loose > 0 && loose >= pack) throw new BizError(`Loose quantity must be less than one pack (${pack}).`);
     if (!input.reason) throw new BizError('Choose a reason.');
-    db.prepare('INSERT INTO stock_adjustments (batch_id,product_id,system_qty,counted_qty,reason,user_id,created_at) VALUES (?,?,?,?,?,?,?)')
-      .run(b.id, b.product_id, b.quantity, counted, input.reason, actor.id, nowIso());
-    db.prepare('UPDATE batches SET quantity = ? WHERE id = ?').run(counted, b.id);
-    audit(db, actor, 'adjust', 'STOCK_ADJUST', { batch: b.id, before: b.quantity, after: counted, reason: input.reason });
+    db.prepare(`INSERT INTO stock_adjustments (batch_id,product_id,system_qty,counted_qty,system_loose,counted_loose,pack_size,reason,user_id,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(b.id, b.product_id, b.quantity, counted, b.loose_units ?? 0, loose, pack, input.reason, actor.id, nowIso());
+    db.prepare('UPDATE batches SET quantity = ?, loose_units = ? WHERE id = ?').run(counted, loose, b.id);
+    audit(db, actor, 'adjust', 'STOCK_ADJUST', { batch: b.id, before: b.quantity, after: counted, loose_before: b.loose_units ?? 0, loose_after: loose, reason: input.reason });
     return { ok: true };
   })();
 }
@@ -584,7 +590,8 @@ export function profitAndLoss(db: DB, from: string, to: string, branchId?: numbe
     WHERE r.created_at BETWEEN ? AND ?${all ? '' : ' AND i.branch_id = ?'}`).get(fromIso, toIso, ...br) as any;
   const retCogs = db.prepare(`SELECT COALESCE(SUM(sri.quantity * sri.purchase_price),0) c FROM sales_return_items sri JOIN sales_returns r ON r.id = sri.return_id
     JOIN invoices i ON i.id = r.invoice_id WHERE r.created_at BETWEEN ? AND ?${all ? '' : ' AND i.branch_id = ?'}`).get(fromIso, toIso, ...br) as any;
-  const shrink = db.prepare(`SELECT COALESCE(SUM((a.system_qty - a.counted_qty) * b.purchase_price),0) s FROM stock_adjustments a JOIN batches b ON b.id = a.batch_id
+  const shrink = db.prepare(`SELECT COALESCE(SUM((a.system_qty - a.counted_qty) * b.purchase_price
+      + ROUND((a.system_loose - a.counted_loose) * 1.0 * b.purchase_price / MAX(a.pack_size,1))),0) s FROM stock_adjustments a JOIN batches b ON b.id = a.batch_id
     WHERE a.created_at BETWEEN ? AND ?${all ? '' : ' AND b.branch_id = ?'}`).get(fromIso, toIso, ...br) as any;
   const exp = db.prepare(`SELECT category, COALESCE(SUM(amount),0) a FROM expenses WHERE date BETWEEN ? AND ?${all ? '' : ' AND branch_id = ?'} GROUP BY category`)
     .all(from, to, ...br) as any[];
