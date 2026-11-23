@@ -30,6 +30,10 @@ export function openDatabase(file: string): DB {
   addCol('invoice_items', 'sale_unit', "TEXT NOT NULL DEFAULT 'pack'");
   addCol('invoice_items', 'unit_size', 'INTEGER NOT NULL DEFAULT 1'); // smallest units in one sold unit
   addCol('invoice_items', 'pack_size', 'INTEGER NOT NULL DEFAULT 1'); // smallest units in one pack
+  // Stock counts can correct opened packs too: loose units before/after, and the pack size at the time.
+  addCol('stock_adjustments', 'system_loose', 'INTEGER NOT NULL DEFAULT 0');
+  addCol('stock_adjustments', 'counted_loose', 'INTEGER NOT NULL DEFAULT 0');
+  addCol('stock_adjustments', 'pack_size', 'INTEGER NOT NULL DEFAULT 1');
   // Allow the 'accountant' role on databases created before it existed (SQLite cannot alter a CHECK,
   // so the users table is rebuilt once; no other table references users by foreign key).
   const usersSql = (db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").get() as { sql: string } | undefined)?.sql ?? '';
