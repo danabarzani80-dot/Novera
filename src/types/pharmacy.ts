@@ -14,11 +14,12 @@ const ALL: Module[] = [
 
 export const ROLE_MODULES: Record<Role, Module[]> = {
   super_admin: ALL,
-  // Each branch is a separate pharmacy: moving stock between branches is admin-only.
+  // Each branch is a separate pharmacy: moving stock between branches is for the admin and the warehouse manager.
   // Profit, net profit and cost of goods sold (accounting / P&L) are admin-only.
   pharmacist: ALL.filter((m) => !['branches', 'users', 'audit', 'transfers', 'accounting'].includes(m)),
   cashier: ['dashboard', 'pos', 'returns', 'customers', 'shifts'],
-  warehouse_manager: ['dashboard', 'products', 'barcode', 'adjust', 'expiry', 'receive', 'rtv', 'supplier'],
+  // The warehouse manager may also move stock between branches (sent from their own branch, received into it).
+  warehouse_manager: ['dashboard', 'products', 'barcode', 'adjust', 'expiry', 'receive', 'rtv', 'supplier', 'transfers'],
   doctor: ['doctor'],
   // Accountant: Accounting only, view-only, totals without cost or profit; can switch between branches.
   accountant: ['accounting'],

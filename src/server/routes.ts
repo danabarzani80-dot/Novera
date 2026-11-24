@@ -303,20 +303,34 @@ export function createRouter() {
     if (!before) throw new BizError('Medicine not found.', 'NOT_FOUND', 404);
     // The catalogue is shared. Staff can always change their own branch's prices/reorder/supplier, but only
     // the admin can rename or re-barcode a medicine that the other branch also stocks or has sold.
+    // The warehouse manager looks after the catalogue for every branch, so they may edit shared medicines too
+    // (name, barcode, pack details, …). Every change is recorded in the audit log with before/after values.
+    const canEditShared = isAdmin(req) || req.user!.role === 'warehouse_manager';
     const shared = ['barcode', 'brand_name', 'generic_name', 'category', 'manufacturer', 'dosage', 'form', 'unit', 'shelf_rack', 'is_rx', 'sheets_per_pack', 'tablets_per_sheet'] as const;
     const norm = (v: unknown) => (v === null || v === undefined || v === '' ? null : String(v));
-    if (!isAdmin(req) && shared.some((k) => norm((before as any)[k]) !== norm((f as any)[k])) && usedByOtherBranch(req.params.id, branchOf(req)))
-      throw new BizError('This medicine is also used by another branch. Only the admin can change its name, barcode or pack details.', 'FORBIDDEN', 403);
-    if (before && (int(before.sheets_per_pack) !== f.sheets_per_pack || int(before.tablets_per_sheet ?? 1) !== f.tablets_per_sheet)) {
-      const open = db().prepare('SELECT COALESCE(SUM(loose_units),0) n FROM batches WHERE product_id = ?').get(req.params.id) as any;
-      if (open.n > 0) throw new BizError('This medicine has an opened pack (loose sheets/tablets). Sell them before changing sheets per pack or tablets per sheet.');
-    }
+    if (!canEditShared && shared.some((k) => norm((before as any)[k]) !== norm((f as any)[k])) && usedByOtherBranch(req.params.id, branchOf(req)))
+      throw new BizError('This medicine is also used by another branch. Only the admin or the warehouse manager can change its name, barcode or pack details.', 'FORBIDDEN', 403);
+    // Changing pack details while a pack is open: keep the loose stock, converted to the new unit (tablets or sheets)
+    // and folded into full packs where it now makes one. Staff recount afterwards; the conversion is in the audit log.
+    const packChanged = before && (int(before.sheets_per_pack) !== f.sheets_per_pack || int(before.tablets_per_sheet ?? 1) !== f.tablets_per_sheet);
+    const reloose = () => {
+      const oldTps = Math.max(1, int(before.tablets_per_sheet) || 1), newTps = Math.max(1, f.tablets_per_sheet);
+      const pack = Math.max(1, f.sheets_per_pack) * newTps;
+      const open = db().prepare('SELECT id, quantity, loose_units FROM batches WHERE product_id = ? AND loose_units > 0').all(req.params.id) as any[];
+      for (const b of open) {
+        const loose = Math.round((b.loose_units / oldTps) * newTps); // old smallest unit -> sheets -> new smallest unit
+        const packs = b.quantity + Math.floor(loose / pack), rest = pack > 1 ? loose % pack : 0;
+        db().prepare('UPDATE batches SET quantity = ?, loose_units = ? WHERE id = ?').run(packs, rest, b.id);
+        audit(db(), actor(req), 'products', 'LOOSE_CONVERTED', { batch: b.id, before: { packs: b.quantity, loose: b.loose_units }, after: { packs, loose: rest } });
+      }
+    };
     try {
       db().transaction(() => {
         // Shared catalogue fields; prices/reorder/supplier are saved for this branch only.
         db().prepare(`UPDATE products SET barcode=@barcode,brand_name=@brand_name,generic_name=@generic_name,category=@category,manufacturer=@manufacturer,
           dosage=@dosage,form=@form,unit=@unit,shelf_rack=@shelf_rack,is_rx=@is_rx,sheets_per_pack=@sheets_per_pack,tablets_per_sheet=@tablets_per_sheet WHERE id=@id`).run({ ...f, id: req.params.id });
         saveBranchFields(int(req.params.id), branchOf(req), f);
+        if (packChanged) reloose();
       })();
     } catch (e) { return dupBarcode(e); }
     audit(db(), actor(req), 'products', 'PRODUCT_UPDATE', { branch: branchOf(req), before, after: f });
@@ -506,7 +520,7 @@ export function createRouter() {
     JOIN products p ON p.id = a.product_id JOIN batches b ON b.id = a.batch_id LEFT JOIN users u ON u.id = a.user_id WHERE b.branch_id = ? ORDER BY a.id DESC LIMIT 100`).all(branchOf(req))));
 
   // Staff only ever see their own branch; the admin sees all of them.
-  r.get('/branches', need('pos', 'products', 'adjust', 'expiry', 'receive', 'rtv', 'transfers', 'supplier'), wrap((req) => isAdmin(req)
+  r.get('/branches', need('pos', 'products', 'adjust', 'expiry', 'receive', 'rtv', 'transfers', 'supplier'), wrap((req) => isAdmin(req) || req.user!.role === 'warehouse_manager' // needs the other branch as a transfer destination
     ? db().prepare('SELECT * FROM branches ORDER BY id').all()
     : db().prepare('SELECT * FROM branches WHERE id = ?').all(branchOf(req))));
   r.post('/branches', need('branches'), wrap((req) => {
