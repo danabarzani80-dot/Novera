@@ -606,6 +606,7 @@ export function createRouter() {
   }));
   r.post('/shifts/open', need('shifts', 'pos'), wrap((req) => core.openShift(db(), actor(req), req.body.opening_cash)));
   r.post('/shifts/close', need('shifts', 'pos'), wrap((req) => core.closeShift(db(), actor(req), req.body.counted_cash)));
+  r.put('/shifts/:id/opening', need('shifts'), wrap((req) => core.setShiftOpening(db(), actor(req), int(req.params.id), req.body.opening_cash)));
   r.get('/shifts', need('shifts'), wrap((req) => {
     const own = req.user!.role === 'cashier';
     return db().prepare(`SELECT s.*, u.name user_name FROM shifts s JOIN users u ON u.id = s.user_id WHERE s.branch_id = ? ${own ? 'AND s.user_id = ?' : ''} ORDER BY s.id DESC LIMIT 60`)

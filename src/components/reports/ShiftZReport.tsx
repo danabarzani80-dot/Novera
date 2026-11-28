@@ -11,7 +11,14 @@ import { Banknote, CreditCard, HandCoins, Wallet } from 'lucide-react';
 
 export default function ShiftZReport() {
   const { t } = useI18n();
-  const { shift, refresh } = useAuth();
+  const { shift, refresh, user } = useAuth();
+  // Admin only: correct a mistyped opening balance (saved in the audit log with old and new amounts).
+  const editOpening = async (id: number, current: number) => {
+    const v = window.prompt(t('edit_opening_prompt'), String(current));
+    if (v === null) return;
+    try { await api.put(`/shifts/${id}/opening`, { opening_cash: Number(v.replace(/[^0-9]/g, '')) }); rep.reload(); shifts.reload(); }
+    catch (e: any) { window.alert(e?.message ?? String(e)); }
+  };
   const shifts = useLoad(() => api.get('/shifts'), [shift?.id]);
   const [selId, setSelId] = useState<number | null>(null);
   const cur = selId ?? shift?.id ?? shifts.data?.[0]?.id ?? null;
@@ -51,7 +58,7 @@ export default function ShiftZReport() {
                 <div style={{ textAlign: 'center', fontWeight: 700, fontSize: 14 }}>{t('z_report')}</div>
                 <div style={{ textAlign: 'center' }}>{r.pharmacy}</div><div style={{ textAlign: 'center' }}>{t('shift')} #{r.id} • {r.user_name}</div>
                 <div style={{ textAlign: 'center' }}>{fmtDateTime(r.opened_at)} → {r.closed_at ? fmtDateTime(r.closed_at) : '…'}</div><hr />
-                <div className="row"><span>{t('opening_cash')}</span><span>{iqd(r.opening_cash)}</span></div>
+                <div className="row"><span>{t('opening_cash')}</span><span>{iqd(r.opening_cash)}{user?.role === 'super_admin' && <button className="no-print ms-2 text-xs font-bold text-blue-600 underline" onClick={() => editOpening(r.id, r.opening_cash)}>{t('edit')}</button>}</span></div>
                 <div className="row"><span>{t('cash_sales')}</span><span>{iqd(r.cash)}</span></div>
                 <div className="row"><span>{t('electronic_sales')}</span><span>{iqd(r.card)}</span></div>
                 <div className="row"><span>{t('qarz_sales')}</span><span>{iqd(r.qarz)}</span></div>
