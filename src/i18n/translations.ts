@@ -313,6 +313,7 @@ export const dictionary: Record<string, T> = {
   system_qty: ['System qty', 'بڕی سیستەم', 'كمية النظام'],
   counted_qty: ['Counted qty', 'بڕی ژمێردراو', 'الكمية المعدودة'],
   difference: ['Difference', 'جیاوازی', 'الفرق'],
+  edit_opening_prompt: ['New opening balance (IQD, steps of 250):', 'باڵانسی سەرەتای نوێ (دینار، هەنگاوی 250):', 'رصيد الافتتاح الجديد (دينار، بخطوات 250):'],
   counted_packs: ['Full packs counted', 'پاکێتی تەواوی ژمێردراو', 'العلب الكاملة المعدودة'],
   counted_loose_sheets: ['Loose sheets (opened pack)', 'شریتی کراوە (پاکێتی کراوە)', 'أشرطة مفتوحة (علبة مفتوحة)'],
   counted_loose_tablets: ['Loose tablets (opened pack)', 'حەبی کراوە (پاکێتی کراوە)', 'حبوب مفتوحة (علبة مفتوحة)'],
