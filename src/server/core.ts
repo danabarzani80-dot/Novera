@@ -517,6 +517,19 @@ export function transitionTransfer(db: DB, actor: Actor, id: number, action: 'ap
 }
 
 // ───────────────────────── Shifts ─────────────────────────
+/** Admin correction of a shift's opening cash (e.g. a typing mistake). Kept in the audit log with old and new amounts. */
+export function setShiftOpening(db: DB, actor: Actor, shiftId: number, openingCash: number) {
+  if (actor.role !== 'super_admin') throw new BizError('Only the admin can correct the opening balance.', 'FORBIDDEN', 403);
+  const s = db.prepare('SELECT * FROM shifts WHERE id = ?').get(shiftId) as any;
+  if (!s) throw new BizError('Shift not found.', 'NOT_FOUND', 404);
+  const amount = int(openingCash);
+  if (amount < 0) throw new BizError('Opening balance cannot be negative.');
+  if (amount % NOTE_STEP !== 0) throw new BizError(`Opening balance must be in steps of ${NOTE_STEP} IQD.`);
+  db.prepare('UPDATE shifts SET opening_cash = ? WHERE id = ?').run(amount, s.id);
+  audit(db, actor, 'shifts', 'SHIFT_OPENING_EDIT', { id: s.id, branch: s.branch_id, before: s.opening_cash, after: amount });
+  return { ok: true };
+}
+
 export function openShift(db: DB, actor: Actor, openingCash: number) {
   if (activeShift(db, actor.id)) throw new BizError('A shift is already open.');
   const id = Number(db.prepare('INSERT INTO shifts (user_id,branch_id,opened_at,opening_cash) VALUES (?,?,?,?)')
